@@ -1,0 +1,137 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage{caption}
+
+\title{Path Optimization in Activation Space:\\A Follow-up Investigation on Activation Plateaus}
+\author{Francisco Ferreira da Silva}
+\date{December 2025}
+
+\begin{document}
+
+\maketitle
+
+\section*{Executive Summary}
+
+Recent work by Shinkle \& StefanHex showed that spherical interpolation (slerp) between certain prompt pairs exhibits ``activation plateaus'': regions where model output stays constant despite activation changes, separated by sharp boundaries. The natural interpretation is that these prompts lie in different stable regions of activation space. We test this by asking: if genuinely distinct regions exist, can any smooth path connect them?
+
+We define an optimization objective balancing path length against output volatility (analogous to least action) and search for smooth paths between prompt pairs that show sharp boundaries along slerp. For ``The house was big'' $\to$ ``The house was in'', we find a nearly linear output profile (Figure~\ref{fig:summary}, blue), but the path is approximately 20 times longer than slerp. Jacobian analysis confirms that slerp crosses a high-sensitivity ridge, while the optimized path winds around it. Notably, sensitivity along the optimized path is also higher in the transition region than near the endpoints, suggesting the path navigates through but does not fully avoid higher-sensitivity areas.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.75\textwidth]{big_vs_in.png}
+    \caption{Relative distance along slerp (red) versus optimized path (blue) for ``The house was big'' $\to$ ``The house was in''. Slerp shows sharp plateau-boundary-plateau pattern; the optimized path is nearly linear.}
+    \label{fig:summary}
+\end{figure}
+
+\section{Introduction}
+
+This document summarizes an investigation following up on the LessWrong post ``Activation Plateaus: Where and How They Emerge'' by Shinkle \& StefanHex. That work showed that spherical interpolation (slerp) between certain prompt pairs exhibits activation plateaus: regions where model output remains nearly constant despite changes in activation, separated by sharp boundaries where output changes rapidly.
+
+The interpretation offered is that prompts' activations lie in different ``stable regions'' of activation space. But if genuinely distinct stable regions exist, no smooth path should connect them. Any path would have to cross a boundary. Slerp shows a boundary, but is it possible to find a path that doesn't?
+
+\section{Path Optimization Framework}
+
+\subsection{Motivation}
+
+Slerp is a natural choice for interpolation, but it is not the only possible path between two points in activation space. If the ``stable regions'' interpretation is correct, then the boundary observed along slerp should be unavoidable: every path between the two prompts should cross it. Finding a smooth path would suggest that the stable-regions picture needs refinement.
+
+\subsection{The Optimization Objective}
+
+We define the optimal path $P(t)$ between points $A$ and $B$ in activation space as the curve minimizing the following functional:
+\begin{equation}
+J(P) = \int_0^1 \|P'(t)\|^2 \, dt + \lambda \int_0^1 \left\|\frac{d}{dt}f(P(t))\right\|^2 dt
+\end{equation}
+subject to boundary conditions $P(0) = A$ and $P(1) = B$.
+
+The first term penalizes path length in activation space (``input kinetic energy''). The second term penalizes output volatility, i.e. how much the model output $f$ changes along the path (``output kinetic energy''). The parameter $\lambda$ balances these objectives:
+\begin{itemize}
+    \item At $\lambda = 0$, we recover a straight line (shortest path, ignoring output behavior).
+    \item As $\lambda \to \infty$, we prioritize smooth output transitions at any path length cost.
+\end{itemize}
+
+This is conceptually analogous to the principle of least action in physics. We seek ``efficient'' paths through activation space that balance distance traveled against output stability.
+
+\subsection{Choice of Norm}
+
+We use the $L_2$ (Euclidean) norm for several reasons reflecting epistemic humility:
+\begin{enumerate}
+    \item Strict convexity: ensures points along the path are evenly spaced.
+    \item Isotropy: assumes no privileged directions in activation space. We know features are privileged directions, but we don't know a priori which directions those are.
+    \item Flatness: assumes no characteristic length scale (infinite radius of curvature). Defining curvature would require choosing a length scale we have no basis for.
+\end{enumerate}
+
+\section{Results}
+
+\subsection{Core Finding: Smooth Paths Exist}
+
+For the prompt pair ``The house was big'' $\to$ ``The house was in'' (which shows a sharp boundary along slerp), path optimization finds a much smoother path. Figure~\ref{fig:relative_distance} shows the relative distance profile: slerp exhibits the characteristic S-curve (flat plateaus with sharp transition), while the optimized path is nearly linear.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.9\textwidth]{big_vs_in.png}
+    \caption{Left: Relative distance $d = \|x - A\| / (\|x - A\| + \|x - B\|)$ along slerp (red) and the optimized path (blue). The slerp path shows the characteristic plateau-boundary-plateau pattern. The optimized path is nearly linear. Right: Optimization loss over iterations.}
+    \label{fig:relative_distance}
+\end{figure}
+
+\subsection{The Cost of Smoothness}
+
+The smooth path is approximately 20 times longer in activation space than slerp. Figure~\ref{fig:path_length} shows the step lengths and cumulative distance along both paths. The optimized path takes large steps in the transition region (steps 15-35), winding through activation space to avoid the high-sensitivity region that slerp crosses directly.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.9\textwidth]{path_length.png}
+    \caption{Left: Step length in activation space at each point along the path. Slerp has uniform step sizes; the optimized path has highly variable steps, with large excursions in the transition region. Right: Cumulative distance traveled. The optimized path is roughly 20 times longer.}
+    \label{fig:path_length}
+\end{figure}
+
+\subsection{Jacobian Analysis}
+
+To understand why smooth paths require such long detours, we analyze the directional sensitivity of the model at different points in activation space. The directional sensitivity in direction $v$ is $\|J \cdot v\|$, where $J$ is the Jacobian of the model output with respect to activations.
+
+Figure~\ref{fig:jacobian_structure} shows the distribution of sensitivities across 100 random directions at the starting point (``The house was big''). The slerp direction has sensitivity 1.6 (86th percentile), while the optimized path tangent has sensitivity 3.4 (highest). Most random directions have lower sensitivity (median 1.2).
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.9\textwidth]{jacobian_structure_around_prompt.png}
+    \caption{Distribution of directional sensitivities at step 0 (``The house was big''). Left: histogram. Right: CDF. The slerp direction (red) is at the 86th percentile; the optimized path direction (blue) has the highest sensitivity of all directions tested.}
+    \label{fig:jacobian_structure}
+\end{figure}
+
+Figure~\ref{fig:jacobian_along_paths} shows how sensitivity evolves along both paths. Along the slerp path (top left), sensitivity in the slerp tangent direction spikes dramatically at the boundary (step $\sim$23), reaching values above 6000. Along the optimized path (top right), sensitivity in the optimized tangent direction stays moderate throughout, remaining below 25 even in the transition region.
+
+The middle row shows output change per step: slerp has a massive spike at the boundary, while the optimized path maintains roughly constant output change. The bottom row compares the product of sensitivity and distance to actual output velocity, showing that the first-order approximation (output change $\approx$ sensitivity $\times$ distance) is reasonable but not exact at the step sizes used.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.95\textwidth]{analysis_jacobian_along_paths.png}
+    \caption{Complete analysis of both paths. Top row: directional sensitivity along each path. Middle row: output change per step and activation distance per step. Bottom row: comparison of sensitivity $\times$ distance to actual output velocity.}
+    \label{fig:jacobian_along_paths}
+\end{figure}
+
+\section{Interpretation}
+
+The existence of smooth (but long) paths suggests that ``activation plateaus'' are not discrete regions with hard boundaries in all directions. Instead, the picture that emerges is:
+
+\begin{enumerate}
+    \item The Jacobian sensitivity landscape is highly non-uniform across activation space. Some regions have higher overall sensitivity than others.
+    \item Within a given location, sensitivity also varies by direction.
+    \item Slerp happens to cross a region where sensitivity in the slerp direction spikes dramatically.
+    \item The optimization finds longer paths that route through different regions of activation space, traveling in directions where sensitivity remains manageable.
+\end{enumerate}
+
+This suggests updating the definition of activation plateaus: they represent resistance to perturbations in some directions, not omnidirectional stability. The boundary is not a wall across all of activation space; it is a high-sensitivity ridge that can be traversed around at the cost of path length.
+
+The fact that smooth short paths do not exist still indicates genuine structure. These points are nearby in activation space but separated by a sensitivity ridge that forces either a sharp transition (slerp) or a long detour (optimized path).
+
+\section{Open Questions}
+
+\begin{enumerate}
+    \item For two points that appear to be in different plateaus, is there always a minimum path length required to connect them smoothly? If so, this length might characterize ``how separated'' they are more fundamentally than the binary plateau/boundary picture.
+    \item How does this connect to steering? If steering works by pushing activations from one region to another, and the model has high sensitivity along direct paths between semantically different prompts, this might explain why steering magnitude matters so much.
+\end{enumerate}
+
+\end{document}
