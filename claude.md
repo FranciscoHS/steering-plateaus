@@ -145,8 +145,6 @@ Extreme steering (α=10) produces "the size of a small town" — emphasizing big
 ### Next Steps
 1. Debug α=1 discrepancy (compare layer0 outputs exactly)
 2. Try steering at middle layers (e.g., layer 18)
-3. Try other prompt pairs: "big"→"small", "big"→"red"
-4. 2D output landscape slices
 
 ### Data Files
 - `results/overshoot_alpha15_gpt2-large.pt` - all logits saved
