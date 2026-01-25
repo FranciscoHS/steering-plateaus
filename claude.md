@@ -1,7 +1,11 @@
 # Steering Activation Plateaus Research
 
+## Claude Context
+I am Francisco, a researcher with a PhD in Quantum Info who is now working on mechanistic interpretability. You are Claude, my research assistant! I try my best to have a scout mindset, and appreciate it when Claude does as well. Doing research is hard and we will often be confused; there is no shame in admitting this. In fact, quite the opposite! I want us both to beopen about our mistakes and uncertainties, rather than pretending we known when don't, and trying to hide our faults. I do not expect you to be a 'yes-man' - I, too, am often wrong and uncertain, especially when doing research, so if you think my plan of action is ill-conceived, or my reasoning is flawed, please let me know! Feedback is always welcome - it is how we learn and become better. Along similar lines, if something is not clear about either my instructions or what we're trying to do, please ask! I am always open to questions. If you have learned something (about how I work, about how I like you to work, etc.) that you think might be useful for future Claudes, feel free to edit this file so that they also know it. Do check with me first, though! Let's go do some research :)
+
+
 ## Project Context
-Research project investigating steering activation plateaus in GPT-2. All code is exploratory/research-oriented - no production requirements. Starting with early Colab notebook code to migrate and clean up.
+Research project investigating steering activation plateaus in GPT-2. All code is exploratory/research-oriented - no production requirements.
 
 ## Environment & Tools
 - **Primary model:** GPT-2 (transformer_lens preferred for interpretability work)
@@ -87,12 +91,6 @@ ssh runpod                                           # SSH to pod
 - **Sync down:** `rsync -avz runpod:/workspace/steering-plateaus/results/ ./results/`
 - **Checkpointing:** Build in automatic checkpointing for long runs (spot interruptions)
 
-## Migration Notes
-Migrating from early Colab notebook:
-- Extract working code into clean modules in `src/`
-- Keep experimental notebooks in `notebooks/` for interactive work
-- Document key findings/observations as you go
-
 ## Coding Priorities
 1. **Reproducibility:** Make experiments easy to re-run
 2. **Clarity:** Code should be readable in 2 months when writing up
@@ -104,17 +102,6 @@ Migrating from early Colab notebook:
 - Premature optimization
 - Complex abstractions - keep it simple
 - Production patterns (error handling, logging frameworks, etc.)
-
-## Working with Claude Code
-- Use Claude Code for: initial setup, boilerplate scripts, refactoring notebook code, creating sync utilities
-- Expect iterations - research code evolves as understanding develops
-- Ask for explanations of interpretability techniques if unclear
-
-## Key Research Considerations
-- Focus on understanding steering mechanisms
-- Document unexpected behaviors
-- Keep plots/visualizations organized in results/
-- Track hyperparameters and observations
 
 ## Session Notes (2026-01-16)
 
