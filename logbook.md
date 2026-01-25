@@ -131,3 +131,129 @@ To perform a more interesting experiment, we need to identify a direction that w
 - Steer along that direction at all positions
 
 GPT-2 has no RLHF or safety training — it's pure next-token prediction. No refusal behavior to steer. Sentiment should be a clean, well-defined direction it understands.
+
+---
+
+## 2026-01-25: Sentiment Steering Experiments
+
+### Goal
+Test whether steering works by pushing between plateaus:
+1. Compute sentiment steering vector (difference-of-means of positive vs negative prompts)
+2. Apply at layer 15 of GPT-2 Large to all tokens
+3. Interpolate between steered points and measure relative distance
+4. Look for plateau → boundary → plateau pattern
+
+### Setup
+
+**Prompts for steering vector:**
+```python
+POSITIVE = ["This is good", "This is great", "This is wonderful", "This is amazing",
+            "This is excellent", "I love this", "This makes me happy", "This is fantastic"]
+NEGATIVE = ["This is bad", "This is terrible", "This is awful", "This is horrible",
+            "This is dreadful", "I hate this", "This makes me sad", "This is disgusting"]
+```
+
+**Magnitude normalization:** Steering vector scaled so `||steering_vec|| = magnitude * ||layer_activation||`. So magnitude=1 means perturbation equals the layer's activation norm.
+
+### Interpolation Results (GPT-2 Large, Layer 15)
+
+Interpolated between negative endpoint (magnitude=-M) and positive endpoint (magnitude=+M).
+
+| Magnitude | Max Deviation from Linear | Area from Linear |
+|-----------|---------------------------|------------------|
+| 1.0 | 0.109 | 0.056 |
+| 2.0 | 0.135 | 0.080 |
+| 5.0 | 0.190 | 0.111 |
+| 10.0 | 0.218 | 0.134 |
+
+S-curve becomes more pronounced with larger magnitude. Evidence of plateau-like structure, though not as clean as Stefan's original findings.
+
+### Generation Results (GPT-2 Large, Single-Steer)
+
+Steering only on first token prediction, then let model run freely.
+
+| Magnitude | Generation |
+|-----------|------------|
+| -10 | "The house was **horrible**. The walls were covered in mold..." |
+| -5 | "The house was **horrible**. The walls were covered in mold..." |
+| -2 | "The house was **horrible**. The walls were covered in mold..." |
+| -1 | "The house was, in fact, a 'mansion' built in the early 1800s" |
+| 0 | "The house was a mess. The kitchen was a mess..." |
+| +1 | "The house was **value-for-value**, and the house was worth more..." |
+| +2 | "The house was **benefits-free**, but the rent was high." |
+| +5 | "The house was **benefits-free**, but the rent was high." |
+| +10 | "The house was **medium-sized**, with a large living room..." |
+
+**Observations:**
+- Negative direction works: "horrible" is clearly negative sentiment
+- Positive direction is weird: "value-for-value", "benefits-free" are strange compound tokens, not clearly positive
+- Saturation: outputs plateau at magnitude ±2 and ±5
+
+**Continuous steering** (every token) breaks the model even at magnitude=1, collapsing into repetition.
+
+### Asymmetric Interpolation (0 → ±2)
+
+Tested interpolating from neutral (magnitude=0) to each direction separately.
+
+| Direction | Area from Linear | Max Velocity |
+|-----------|------------------|--------------|
+| 0 → -2 | 0.240 | 6.57 |
+| 0 → +2 | 0.251 | 4.67 |
+
+**Key finding:** Both directions show nearly identical curves with sharp transition very early (t ≈ 0.1-0.15, corresponding to magnitude ≈ 0.2-0.3). The real activation is NOT in a plateau with respect to the sentiment direction — instead shows piecewise linear with *higher* slope from the neutral point.
+
+**Interpretation:** GPT-2 Large may not have robust learned representations for sentiment. The steep initial slope means small perturbations cause large logit changes — opposite of plateau-like robustness.
+
+### GPT-2 XL + Simple Prompts (Failed Experiment)
+
+Tried switching to GPT-2 XL (1.5B params) with simpler single-word prompts based on Turner et al. (2023):
+- `POSITIVE = ["Love", "Happy", "Great", "Wonderful"]`
+- `NEGATIVE = ["Hate", "Sad", "Terrible", "Awful"]`
+- Layer 16 (as in paper)
+
+**Results — Single-steer:**
+
+| Magnitude | Generation |
+|-----------|------------|
+| -2.00 | `The house was-\n\nThe house was-\n\n...` (broken) |
+| -1.00 | `The house was-\n\nThe house was-\n\n...` (broken) |
+| +0.00 | `The house was built in the late 1800s...` (coherent) |
+| +1.00 | `The house was\n\na\n\nhouse\n\nthat\n\nwas\n\na` (broken) |
+| +2.00 | (same as +1.00) |
+
+**Results — Continuous steering:**
+
+| Magnitude | Generation |
+|-----------|------------|
+| -2.00 | `The house was-r-------------` |
+| -1.00 | `The house was-,-,-,-,-,-,-,-` |
+| +0.00 | `The house was built in the late 1800s...` (coherent) |
+| +1.00 | `The house was` (stops generating) |
+| +2.00 | `The house was` (stops generating) |
+
+Simple prompts + GPT-2 XL performed **worse** than sentence prompts + GPT-2 Large. Model completely breaks at magnitude=1.
+
+### Open Questions
+
+1. Why does positive steering produce weird compound tokens ("value-for-value") instead of positive sentiment?
+2. Why is the neutral point not in a plateau? Does GPT-2 lack robust sentiment representations?
+3. Would a different prompt (e.g., "Dinner was") elicit clearer sentiment?
+
+### Next Steps
+
+1. **GPT-2 XL + original sentence prompts** — isolate whether the model or prompts caused the failure
+2. If that fails, consider MELBO-like approach to find directions with actual plateau structure
+3. Consider smarter models (Qwen-4B) if GPT-2 proves hopeless
+
+### References
+
+- Turner et al. (2023) "Steering Language Models With Activation Engineering" — used GPT-2 XL with simple prompts, coefficients up to 15
+- [LessWrong post](https://www.lesswrong.com/posts/5spBue2z2tw4JuDCx/steering-gpt-2-xl-by-adding-an-activation-vector)
+
+### Data Files
+
+- `results/sentiment_steering/steering_vec_layer15.pt` — steering vector
+- `results/sentiment_steering/interp_results_mag*.pt` — interpolation results
+- `results/sentiment_steering/figures/interpolation_mag*.png` — interpolation plots
+- `results/sentiment_steering/figures/interp_0.0_to_*.png` — asymmetric interpolation plots
+- `results/sentiment_steering/generation_results.txt` — generation outputs
