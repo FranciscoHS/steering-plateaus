@@ -5,12 +5,14 @@ I am Francisco, a researcher with a PhD in Quantum Info who is now working on me
 
 **Important workflow note:** When running experiments, always show results before deciding to run follow-up experiments. Don't independently decide to explore new parameter ranges or variations without asking first. It's fine to have opinions and make suggestions, but ask before acting on them.
 
+**Results formatting:** When presenting experiment results, use plain markdown bullet lists (not tables) so Francisco can easily copy them into his logbook notes. Tables render poorly when copy-pasted. Keep formatting compact — no blank lines between sections or between the last bullet and the next heading.
+
 
 ## Project Context
-Research project investigating steering activation plateaus in GPT-2. All code is exploratory/research-oriented - no production requirements.
+Research project investigating whether steering works by pushing activations between plateaus. Started with GPT-2, now also using Qwen instruction-tuned models for refusal steering. All code is exploratory/research-oriented - no production requirements.
 
 ## Environment & Tools
-- **Primary model:** GPT-2 (transformer_lens preferred for interpretability work)
+- **Models:** GPT-2 (Large/XL) and Qwen2.5-Instruct series (transformer_lens preferred)
 - **Compute:** RunPod spot instances (A100s)
 - **Version control:** Git
 - **Logging:** Simple print statements (no wandb/tensorboard overhead)
@@ -126,6 +128,13 @@ The SSH host is always `runpod` (configured automatically by `rpc create`).
 
 **Checkpointing:** Build in automatic checkpointing for long runs (spot interruptions)
 
+**Venv workaround:** RunPod base images sometimes have torch/torchvision version mismatches. If you see errors like "torchvision was built for torch 2.8 but you have 2.10", create a venv:
+```bash
+python -m venv venv
+source venv/bin/activate
+pip install torch transformer_lens matplotlib
+```
+
 ## Coding Priorities
 1. **Reproducibility:** Make experiments easy to re-run
 2. **Clarity:** Code should be readable in 2 months when writing up
@@ -138,36 +147,35 @@ The SSH host is always `runpod` (configured automatically by `rpc create`).
 - Complex abstractions - keep it simple
 - Production patterns (error handling, logging frameworks, etc.)
 
-## Session Notes (2026-01-16)
+## Transformer Lens Patterns
 
-### What We Did
-Ran steering experiments on GPT-2 Large. Steering vector = `layer0_output("in") - layer0_output("big")` at last token position. Applied at **layer 1** (very early - steering often done at middle layers).
+**Steering + capturing activations:** Use `run_with_hooks` (not `run_with_cache`) when you need both steering and capturing:
 
-### Key Results
-1. **Steering sweep (α=0→1):** Clean sigmoid/step transition at α≈0.5, matching interpolation findings
-2. **Overshoot (α=0→15):** Second boundary at α≈5.5. Model doesn't break, just shifts regimes:
-   - α<0.5: "enough", ",", "and" (adjective continuation)
-   - α=0.5-5: "a", "the" (article mode)
-   - α=5.5-7: "was", "had" appear
-   - α>10: "the" dominates (38%)
-3. **Generation with steering:** Re-steering every token causes repetition collapse. Single-steer (first token only) works better.
+```python
+captured = {}
 
-### Open Question: α=1 Discrepancy
-Natural "The house was in" → "a state of disrepair"
-Steered α=1 → "a lot of people were in it"
+def steering_hook(activation, hook):
+    activation[:, :, :] += magnitude * steering_vec
+    return activation
 
-Both start with "a" but diverge after. **Why?** Hypotheses:
-- Numerical precision + greedy decoding amplification
-- Layer 1 steering too early (try middle layers?)
-- Need to verify layer0 outputs match exactly
+def capture_hook(activation, hook):
+    captured['act'] = activation[:, -1, :].clone()
+    return activation
 
-### Interesting Observation
-Extreme steering (α=10) produces "the size of a small town" — emphasizing bigness! The big→in vector might encode scalar intensity.
+model.run_with_hooks(
+    tokens,
+    fwd_hooks=[
+        (f"blocks.{steer_layer}.hook_resid_post", steering_hook),
+        (f"blocks.{capture_layer}.hook_resid_post", capture_hook)
+    ]
+)
+```
 
-### Next Steps
-1. Debug α=1 discrepancy (compare layer0 outputs exactly)
-2. Try steering at middle layers (e.g., layer 18)
+**Hook signature:** Always use `def hook(activation, hook):` — transformer_lens passes the hook object as second positional arg.
 
-### Data Files
-- `results/overshoot_alpha15_gpt2-large.pt` - all logits saved
-- `results/overshoot_predictions_alpha15_gpt2-large.txt` - token predictions at various α
+## Session Logbook
+
+Detailed session notes are in `logbook.md`. Key experiments:
+- 2026-01-16: GPT-2 steering basics (big→in activation patching)
+- 2026-01-25: Sentiment steering attempts (mostly failed)
+- 2026-01-26: Refusal steering with Qwen (promising plateau-like structure)
