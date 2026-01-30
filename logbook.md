@@ -1,5 +1,62 @@
 # Steering Plateaus Logbook
 
+## 2026-01-30: Real vs Random Activation Comparison (GPT-2 Large, Layer 6)
+
+### Goal
+Compare geometric properties of real activations (from FineWeb) vs covariance-matched random activations. Specifically: Jacobian Frobenius norm, top singular value, and logit entropy.
+
+### Setup
+- GPT-2 Large, residual stream at layer 6, final token position
+- Real activations: 100 FineWeb texts (from 1350 used for covariance estimation), each evaluated with its own native context
+- Random activations: 100 samples from N(mean, cov) fitted to 1350 real activations. Full-rank covariance (1350 > d=1280). All paired with a single fixed real context (first FineWeb sample)
+- Metrics per point: top-5 singular values of Jacobian (Lanczos on J^T J), Frobenius norm (estimated via random projections, 50 directions), logit entropy
+- FineWeb loading: `fineweb-edu` sample-10BT, streaming, seed=42, min 10 tokens, truncated to 512
+
+### Results
+- **Jacobian Frobenius Norm:**
+  - Real: mean=57.3, std=38.1
+  - Random: mean=519.3, std=619.7
+- **Top Singular Value:**
+  - Real: mean=29.2, std=28.0
+  - Random: mean=402.8, std=523.4
+- **Logit Entropy:**
+  - Real: mean=3.05, std=1.53
+  - Random: mean=4.25, std=1.74
+
+### Observations
+- Jacobian metrics show strong separation: real activations are ~9x lower (Frobenius) and ~14x lower (top SV) than random
+- Real activations tightly concentrated near zero (almost all below 100); random activations have heavy right tail with outliers up to 5000-6000
+- Entropy is a weak discriminator — distributions overlap heavily
+- Consistent with real activations living in "flat" regions of the logit landscape
+
+### Discrepancy with Stefan's results
+Stefan's comparable experiment (same model, layer, metric) found Frobenius norms of 27.8 (real, std=1.3) and 29.8 (random, std=4.9). Our results differ substantially:
+- Our real activations are 2x higher Frobenius norm (57 vs 28)
+- Our random activations are vastly higher (519 vs 30)
+- Our stds are much larger
+Possible explanations: different prompt lengths/content, different random sampling method, different Frobenius norm computation (we use random projection estimate, Stefan may use exact), different layer convention, or a bug. Awaiting Stefan's code to compare.
+
+### Known issues
+- Prompts not saved in results.pkl (only checkpoint, which was lost). Reproducible via seed=42 but should save in future runs.
+- Random projection estimate of Frobenius norm (50 samples) may be noisy — could explain high variance
+- Checkpoint files are ~4GB (storing all 1350 contexts) — unwieldy
+
+### Code
+- `src/model.py` — added `forward_from_layer`, `extract_activations`
+- `src/data.py` — new: `load_fineweb_samples`, `sample_random_activations`
+- `src/analysis.py` — made layer-aware, added `estimate_frobenius_norm`, `compute_logit_entropy`
+- `src/visualization.py` — added `plot_distribution_comparison`
+- `scripts/run_plateau_analysis.py` — experiment runner with 5-stage checkpointing
+- Results in `results/plateau_analysis/`
+
+### Next steps
+- Compare code with Stefan's to identify source of discrepancy
+- Save prompts in results file
+- Consider exact Frobenius norm computation (or more random projection samples) to reduce variance
+- Boundary point analysis (deferred — requires designing prompt pairs differing only on final token)
+
+---
+
 ## 2026-01-16: Minimal Steering Experiment
 
 ### Setup

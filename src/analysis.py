@@ -11,7 +11,7 @@ Includes:
 import torch
 import numpy as np
 from scipy.sparse.linalg import eigsh, LinearOperator
-from .model import forward_from_layer1, get_logits_at_point
+from .model import forward_from_layer1, forward_from_layer, get_logits_at_point
 
 
 def compute_velocity_profile(model, prefix_resid, path):
@@ -87,7 +87,7 @@ def get_top_k_predictions(model, tokenizer, prefix_resid, point, k=5):
     }
 
 
-def compute_directional_sensitivity(model, prefix_resid, point, direction, epsilon=0.01):
+def compute_directional_sensitivity(model, prefix_resid, point, direction, layer=0, epsilon=0.01):
     """
     Compute sensitivity ||∂f/∂x · v|| in a given direction.
 
@@ -98,15 +98,16 @@ def compute_directional_sensitivity(model, prefix_resid, point, direction, epsil
         prefix_resid: [1, seq_len-1, hidden_dim]
         point: [1, 1, hidden_dim] - Point to analyze
         direction: [1, 1, hidden_dim] - Direction vector (should be unit norm)
+        layer: Layer index (0-indexed)
         epsilon: Finite difference step size
 
     Returns:
         sensitivity: scalar (norm of output change per unit input change)
     """
     with torch.no_grad():
-        logits_center = get_logits_at_point(model, prefix_resid, point)
+        logits_center = get_logits_at_point(model, prefix_resid, point, layer=layer)
         perturbed = point + epsilon * direction
-        logits_perturbed = get_logits_at_point(model, prefix_resid, perturbed)
+        logits_perturbed = get_logits_at_point(model, prefix_resid, perturbed, layer=layer)
 
         diff = (logits_perturbed - logits_center) / epsilon
         sensitivity = torch.norm(diff).item()
@@ -114,7 +115,7 @@ def compute_directional_sensitivity(model, prefix_resid, point, direction, epsil
     return sensitivity
 
 
-def sample_random_sensitivities(model, prefix_resid, point, n_samples=100):
+def sample_random_sensitivities(model, prefix_resid, point, layer=0, n_samples=100):
     """
     Sample sensitivity in random directions to characterize the local landscape.
 
@@ -122,6 +123,7 @@ def sample_random_sensitivities(model, prefix_resid, point, n_samples=100):
         model: GPT-2 model
         prefix_resid: [1, seq_len-1, hidden_dim]
         point: [1, 1, hidden_dim]
+        layer: Layer index (0-indexed)
         n_samples: Number of random directions to sample
 
     Returns:
@@ -134,13 +136,13 @@ def sample_random_sensitivities(model, prefix_resid, point, n_samples=100):
     for _ in range(n_samples):
         random_dir = torch.randn(1, 1, hidden_dim, device=device)
         random_dir = random_dir / torch.norm(random_dir)
-        sens = compute_directional_sensitivity(model, prefix_resid, point, random_dir)
+        sens = compute_directional_sensitivity(model, prefix_resid, point, random_dir, layer=layer)
         sensitivities.append(sens)
 
     return np.array(sensitivities)
 
 
-def compute_top_singular_values(model, prefix_resid, point, k=100):
+def compute_top_singular_values(model, prefix_resid, point, layer=0, k=100):
     """
     Compute top-k singular values of the Jacobian J = d(logits)/d(activation).
 
@@ -151,6 +153,7 @@ def compute_top_singular_values(model, prefix_resid, point, k=100):
         model: GPT-2 model
         prefix_resid: [1, seq_len-1, hidden_dim]
         point: [1, 1, hidden_dim]
+        layer: Layer index (0-indexed)
         k: Number of singular values to compute
 
     Returns:
@@ -162,7 +165,7 @@ def compute_top_singular_values(model, prefix_resid, point, k=100):
 
     # Precompute base logits
     with torch.no_grad():
-        logits_base = get_logits_at_point(model, prefix_resid, point)
+        logits_base = get_logits_at_point(model, prefix_resid, point, layer=layer)
 
     def jtj_matvec(v_np):
         """Compute J^T J v using finite differences + backprop."""
@@ -171,12 +174,12 @@ def compute_top_singular_values(model, prefix_resid, point, k=100):
         # Jv via finite differences
         eps = 1e-4
         with torch.no_grad():
-            logits_pert = get_logits_at_point(model, prefix_resid, point + eps * v)
+            logits_pert = get_logits_at_point(model, prefix_resid, point + eps * v, layer=layer)
         Jv = (logits_pert - logits_base) / eps
 
         # J^T(Jv) via backprop
         act = point.clone().requires_grad_(True)
-        logits = get_logits_at_point(model, prefix_resid, act)
+        logits = get_logits_at_point(model, prefix_resid, act, layer=layer)
         (logits * Jv.detach()).sum().backward()
 
         return act.grad.reshape(-1).cpu().numpy().astype(np.float64)
@@ -225,3 +228,50 @@ def analyze_path_semantics(model, tokenizer, prefix_resid, path, sample_indices=
         results.append(preds)
 
     return results
+
+
+def estimate_frobenius_norm(model, context, point, layer, n_samples=100, epsilon=0.01):
+    """
+    Estimate Frobenius norm of Jacobian via random projections.
+
+    Uses the identity: E[||Jv||^2] = ||J||_F^2 / d for unit random v.
+    So ||J||_F^2 = d * E[||Jv||^2].
+
+    Args:
+        model: GPT-2 model
+        context: [1, seq_len-1, hidden_dim]
+        point: [1, 1, hidden_dim]
+        layer: Layer index (0-indexed)
+        n_samples: Number of random directions
+        epsilon: Finite difference step size
+
+    Returns:
+        frobenius_norm: estimated ||J||_F
+    """
+    sensitivities = sample_random_sensitivities(
+        model, context, point, layer=layer, n_samples=n_samples
+    )
+    d = point.shape[-1]
+    # E[||Jv||^2] where v is unit vector
+    mean_sq = np.mean(sensitivities ** 2)
+    frobenius_sq = d * mean_sq
+    return np.sqrt(frobenius_sq)
+
+
+def compute_logit_entropy(model, context, point, layer):
+    """
+    Compute entropy of the output distribution at a point.
+
+    Args:
+        model: GPT-2 model
+        context: [1, seq_len-1, hidden_dim]
+        point: [1, 1, hidden_dim]
+        layer: Layer index (0-indexed)
+
+    Returns:
+        entropy: scalar
+    """
+    with torch.no_grad():
+        logits = get_logits_at_point(model, context, point, layer=layer)
+        probs = torch.softmax(logits, dim=-1)
+        return compute_entropy(probs)

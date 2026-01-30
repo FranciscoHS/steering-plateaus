@@ -207,3 +207,50 @@ def plot_sensitivity_histogram(sensitivities, slerp_sensitivity=None,
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
 
     plt.show()
+
+
+def plot_distribution_comparison(real_values, random_values, metric_name,
+                                  title=None, save_path=None):
+    """
+    Plot overlaid histograms comparing real vs random activation metrics.
+
+    Args:
+        real_values: array of metric values for real activations
+        random_values: array of metric values for random activations
+        metric_name: Name of metric (for axis label)
+        title: Plot title (auto-generated if None)
+        save_path: Path to save figure
+    """
+    plt.figure(figsize=(8, 5))
+
+    # Compute shared bins
+    all_values = np.concatenate([real_values, random_values])
+    bins = np.linspace(np.min(all_values), np.max(all_values), 30)
+
+    plt.hist(real_values, bins=bins, alpha=0.6, label='Real', color='blue', edgecolor='black')
+    plt.hist(random_values, bins=bins, alpha=0.6, label='Random', color='red', edgecolor='black')
+
+    # Add vertical lines for means
+    real_mean = np.mean(real_values)
+    random_mean = np.mean(random_values)
+    plt.axvline(real_mean, color='blue', linestyle='--', linewidth=2,
+                label=f'Real mean: {real_mean:.2f}')
+    plt.axvline(random_mean, color='red', linestyle='--', linewidth=2,
+                label=f'Random mean: {random_mean:.2f}')
+
+    plt.xlabel(metric_name)
+    plt.ylabel("Count")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    if title:
+        plt.title(title)
+    else:
+        plt.title(f"{metric_name}: Real vs Random Activations")
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+
+    plt.show()

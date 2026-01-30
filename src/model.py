@@ -105,19 +105,86 @@ def forward_from_layer1(model, prefix_resid, path_vectors):
     return logits
 
 
-def get_logits_at_point(model, prefix_resid, point):
+def forward_from_layer(model, context, point, start_layer):
+    """
+    Forward pass from an arbitrary layer, batched over points.
+
+    Generalizes forward_from_layer1 to start from any layer.
+
+    Args:
+        model: GPT-2 model
+        context: [1, seq_len-1, hidden_dim] - Prefix residual stream at start_layer
+        point: [n_points, 1, hidden_dim] - Final-token activation(s)
+        start_layer: Layer index (0-indexed). Runs blocks [start_layer+1:] onward.
+
+    Returns:
+        logits: [n_points, vocab_size] - Output logits for final token
+    """
+    n_points = point.shape[0]
+
+    context_batch = context.expand(n_points, -1, -1)
+    hidden = torch.cat([context_batch, point], dim=1)
+
+    for block in model.transformer.h[start_layer + 1:]:
+        hidden = block(hidden)[0]
+
+    hidden = model.transformer.ln_f(hidden)
+    logits = model.lm_head(hidden[:, -1, :])
+
+    return logits
+
+
+def get_logits_at_point(model, prefix_resid, point, layer=0):
     """
     Get output logits at a single activation point.
-
-    Convenience wrapper around forward_from_layer1 for single points.
 
     Args:
         model: GPT-2 model
         prefix_resid: [1, seq_len-1, hidden_dim]
         point: [1, 1, hidden_dim]
+        layer: Layer index (0-indexed). Default 0 for backward compatibility.
 
     Returns:
         logits: [vocab_size] tensor
     """
-    logits = forward_from_layer1(model, prefix_resid, point)
+    logits = forward_from_layer(model, prefix_resid, point, layer)
     return logits.squeeze(0)
+
+
+def extract_activations(model, tokenizer, texts, layer, device, batch_size=1):
+    """
+    Extract residual stream activations at a given layer for multiple texts.
+
+    For each text, returns the context (prefix positions) and the final-token
+    activation at the specified layer. Stores results on CPU to save GPU memory.
+
+    Args:
+        model: GPT-2 model
+        tokenizer: GPT-2 tokenizer
+        texts: list of strings
+        layer: transformer block index (0-indexed)
+        device: torch device
+        batch_size: texts per batch (1 for variable-length texts)
+
+    Returns:
+        contexts: list of [1, seq_len-1, hidden_dim] tensors (CPU)
+        activations: [n_texts, hidden_dim] tensor (CPU)
+    """
+    contexts = []
+    activations = []
+
+    for text in texts:
+        tokens = tokenizer(text, return_tensors='pt', truncation=True, max_length=1024).to(device)
+
+        with torch.no_grad():
+            outputs = model(**tokens, output_hidden_states=True)
+
+        # hidden_states[layer+1] = residual stream after transformer block `layer`
+        hidden = outputs.hidden_states[layer + 1]
+
+        contexts.append(hidden[:, :-1, :].cpu())
+        activations.append(hidden[:, -1, :].squeeze(0).cpu())
+
+    activations = torch.stack(activations)
+
+    return contexts, activations
