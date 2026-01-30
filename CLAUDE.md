@@ -1,4 +1,4 @@
-# Steering Activation Plateaus Research
+# Activation Plateaus Research
 
 ## Claude Context
 I am Francisco, a researcher with a PhD in Quantum Info who is now working on mechanistic interpretability. You are Claude, my research assistant! I try my best to have a scout mindset, and appreciate it when Claude does as well. Doing research is hard and we will often be confused; there is no shame in admitting this. In fact, quite the opposite! I want us both to be open about our mistakes and uncertainties, rather than pretending we know when don't, and trying to hide our faults. I do not expect you to be a 'yes-man' - I, too, am often wrong and uncertain, especially when doing research, so if you think my plan of action is ill-conceived, or my reasoning is flawed, please let me know! Feedback is always welcome - it is how we learn and become better. Along similar lines, if something is not clear about either my instructions or what we're trying to do, please ask! I am always open to questions. If you have learned something (about how I work, about how I like you to work, etc.) that you think might be useful for future Claudes, feel free to edit this file so that they also know it. Do check with me first, though! Let's go do some research :)
@@ -7,12 +7,61 @@ I am Francisco, a researcher with a PhD in Quantum Info who is now working on me
 
 **Results formatting:** When presenting experiment results, use plain markdown bullet lists (not tables) so Francisco can easily copy them into his logbook notes. Tables render poorly when copy-pasted. Keep formatting compact — no blank lines between sections or between the last bullet and the next heading.
 
+## Project Overview
+
+This project investigates what distinguishes real activations (arising from actual inputs) from arbitrary points in activation space in language models. We want to characterize the geometric properties of real activations, random activations, and boundary points (identified during interpolation between real activations).
+
+## Existing Code
+
+Look at these files for existing infrastructure and patterns:
+- `src/model.py`
+- `src/analysis.py`
+- `src/visualization.py`
+
+## Task
+
+Implement code for:
+1. Sampling real activations from FineWeb
+2. Sampling random activations (Gaussian with matched mean and full covariance)
+3. Identifying boundary points via interpolation
+4. Computing Jacobian eigenspectrum
+5. Computing metrics and visualizations
+
+## Specifications
+
+### Model
+- GPT-2 Large
+- Residual stream activations
+- Final token position only
+- Layer as free parameter (start with layer 6)
+
+### Real activations
+- Source: FineWeb
+- Number of samples: 100 to start
+
+### Random activations
+- Gaussian with mean and full covariance matched to real activations
+- Same number of samples as real
+
+### Boundary points
+- Interpolate (slerp) between pairs of real activations
+- Identify boundary as point of maximum sensitivity along tangent to path
+
+### Jacobian computation
+- Jacobian of logits with respect to activations at layer L
+- Compute top-5 eigenvalues
+
+### Metrics
+- Jacobian norm: mean and std across samples
+- Logit entropy: as behavioral evaluation metric
+
+### Visualizations
+- Distributions of Jacobian norm across categories (real, random, boundary)
 
 ## Project Context
-Research project investigating whether steering works by pushing activations between plateaus. Started with GPT-2, now also using Qwen instruction-tuned models for refusal steering. All code is exploratory/research-oriented - no production requirements.
+Research project investigating activation plateaus. All code is exploratory/research-oriented - no production requirements.
 
 ## Environment & Tools
-- **Models:** GPT-2 (Large/XL) and Qwen2.5-Instruct series (transformer_lens preferred)
 - **Compute:** RunPod spot instances (A100s)
 - **Version control:** Git
 - **Logging:** Simple print statements (no wandb/tensorboard overhead)
