@@ -254,3 +254,45 @@ def plot_distribution_comparison(real_values, random_values, metric_name,
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
 
     plt.show()
+
+
+def plot_three_way_comparison(values_dict, metric_name, title=None, save_path=None):
+    """
+    Plot overlaid histograms comparing multiple categories of activations.
+
+    Args:
+        values_dict: dict mapping category names to arrays of metric values,
+            e.g. {'Real': [...], 'Random (diagonal)': [...], 'Random (full cov)': [...]}
+        metric_name: Name of metric (for axis label)
+        title: Plot title (auto-generated if None)
+        save_path: Path to save figure
+    """
+    colors = ['blue', 'red', 'orange', 'green', 'purple']
+    plt.figure(figsize=(10, 5))
+
+    all_values = np.concatenate(list(values_dict.values()))
+    bins = np.linspace(np.min(all_values), np.max(all_values), 40)
+
+    for i, (name, values) in enumerate(values_dict.items()):
+        color = colors[i % len(colors)]
+        mean = np.mean(values)
+        plt.hist(values, bins=bins, alpha=0.5, label=f'{name} (mean={mean:.1f})',
+                 color=color, edgecolor='black', linewidth=0.5)
+        plt.axvline(mean, color=color, linestyle='--', linewidth=2, alpha=0.8)
+
+    plt.xlabel(metric_name)
+    plt.ylabel("Count")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    if title:
+        plt.title(title)
+    else:
+        plt.title(f"{metric_name}: Activation Comparison")
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+
+    plt.show()

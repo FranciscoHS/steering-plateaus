@@ -9,9 +9,10 @@ Includes:
 """
 
 import torch
+from torch.func import jvp
 import numpy as np
 from scipy.sparse.linalg import eigsh, LinearOperator
-from .model import forward_from_layer1, forward_from_layer, get_logits_at_point
+from .model import forward_from_layer1, forward_from_layer, forward_from_layer_allpos, get_logits_at_point
 
 
 def compute_velocity_profile(model, prefix_resid, path):
@@ -228,6 +229,65 @@ def analyze_path_semantics(model, tokenizer, prefix_resid, path, sample_indices=
         results.append(preds)
 
     return results
+
+
+def estimate_frobenius_norm_hutchinson(model, activations, layer, n_probes=100, seed=None):
+    """
+    Estimate Frobenius norm of Jacobian via Hutchinson's trace estimator.
+
+    Uses forward-mode AD (torch.func.jvp) for exact Jacobian-vector products.
+    Estimates ||J||_F^2 = E[||Jv||^2] where v ~ N(0, I).
+
+    The function f maps layer-L activations (all positions, flattened) to
+    final-position logits.
+
+    Temporarily disables SDPA (scaled dot product attention) because
+    torch.func.jvp doesn't support it yet.
+
+    Args:
+        model: GPT-2 model
+        activations: [1, seq_len, hidden_dim] - Full residual stream at layer L
+        layer: Layer index (0-indexed)
+        n_probes: Number of random probe vectors
+        seed: Random seed (optional)
+
+    Returns:
+        frobenius_norm: estimated ||J||_F
+        frobenius_sq_std: std of the per-probe estimates of ||J||_F^2 (for diagnostics)
+    """
+    if seed is not None:
+        torch.manual_seed(seed)
+
+    device = activations.device
+    seq_len, d_model = activations.shape[1], activations.shape[2]
+    D = seq_len * d_model
+
+    # Define the function from flat activations to logits
+    # Disable SDPA since forward-mode AD doesn't support it
+    def f(flat_act):
+        act = flat_act.reshape(1, seq_len, d_model)
+        with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
+            return forward_from_layer_allpos(model, act, layer)  # [1, vocab]
+
+    flat_act = activations.reshape(D)
+
+    estimates = []
+    for i in range(n_probes):
+        # Random Gaussian probe vector
+        v = torch.randn(D, device=device)
+
+        # Exact Jv via forward-mode AD
+        _, Jv = jvp(f, (flat_act,), (v,))
+
+        # ||Jv||^2 is an unbiased estimate of ||J||_F^2 (when v ~ N(0, I))
+        estimates.append(Jv.squeeze().norm().item() ** 2)
+
+    estimates = np.array(estimates)
+    frobenius_sq = np.mean(estimates)
+    frobenius_norm = np.sqrt(max(frobenius_sq, 0))
+    frobenius_sq_std = np.std(estimates)
+
+    return frobenius_norm, frobenius_sq_std
 
 
 def estimate_frobenius_norm(model, context, point, layer, n_samples=100, epsilon=0.01):

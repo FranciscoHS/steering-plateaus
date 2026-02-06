@@ -134,6 +134,33 @@ def forward_from_layer(model, context, point, start_layer):
     return logits
 
 
+def forward_from_layer_allpos(model, hidden_states, start_layer):
+    """
+    Forward pass from an arbitrary layer, patching ALL positions.
+
+    Unlike forward_from_layer (which takes separate context + final-token),
+    this takes the full residual stream at all positions and runs the
+    remaining layers + ln_f + lm_head.
+
+    Args:
+        model: GPT-2 model
+        hidden_states: [batch, seq_len, hidden_dim] - Full residual stream at start_layer
+        start_layer: Layer index (0-indexed). Runs blocks [start_layer+1:] onward.
+
+    Returns:
+        logits: [batch, vocab_size] - Output logits for final token only
+    """
+    hidden = hidden_states
+
+    for block in model.transformer.h[start_layer + 1:]:
+        hidden = block(hidden)[0]
+
+    hidden = model.transformer.ln_f(hidden)
+    logits = model.lm_head(hidden[:, -1, :])
+
+    return logits
+
+
 def get_logits_at_point(model, prefix_resid, point, layer=0):
     """
     Get output logits at a single activation point.
@@ -188,3 +215,40 @@ def extract_activations(model, tokenizer, texts, layer, device, batch_size=1):
     activations = torch.stack(activations)
 
     return contexts, activations
+
+
+def extract_activations_allpos(model, tokenizer, token_ids_list, layer, device, batch_size=64):
+    """
+    Extract residual stream activations at ALL positions for fixed-length token sequences.
+
+    Args:
+        model: GPT-2 model
+        tokenizer: GPT-2 tokenizer
+        token_ids_list: list of [seq_len] tensors (all same length)
+        layer: transformer block index (0-indexed)
+        device: torch device
+        batch_size: sequences per batch
+
+    Returns:
+        activations: [n_sequences, seq_len * hidden_dim] tensor (CPU) - concatenated
+    """
+    all_activations = []
+
+    for i in range(0, len(token_ids_list), batch_size):
+        batch_tokens = torch.stack(token_ids_list[i:i+batch_size]).to(device)
+
+        with torch.no_grad():
+            outputs = model(batch_tokens, output_hidden_states=True)
+
+        # hidden_states[layer+1] = residual stream after block `layer`
+        hidden = outputs.hidden_states[layer + 1]  # [batch, seq_len, d]
+
+        # Flatten positions: [batch, seq_len * d]
+        batch_flat = hidden.reshape(hidden.shape[0], -1).cpu()
+        all_activations.append(batch_flat)
+
+        if (i // batch_size) % 10 == 0:
+            print(f"  Extracted {min(i + batch_size, len(token_ids_list))}/{len(token_ids_list)}", end='\r')
+
+    print()
+    return torch.cat(all_activations, dim=0)

@@ -1,5 +1,61 @@
 # Steering Plateaus Logbook
 
+## 2026-02-06: Jacobian Analysis v2 — All-Positions Patching
+
+### Goal
+Extend v1's Jacobian analysis from final-token-only to all-positions patching. In v1, random activations at the last position still had real context at all other positions — layers 7+ could attend to this real structure, so the "random" activation was processed in a partly-real environment. By randomizing all positions simultaneously, we test a stronger notion of "random" with no real structure to lean on anywhere. Also: compare diagonal vs full covariance Gaussians to test whether correlations between entries/positions matter for "realness."
+
+### Setup
+- GPT-2 Large, residual stream at layer 6, **all 5 positions** (D = 5 × 1280 = 6400)
+- Fixed sequence length of 5 tokens (short to keep dimensionality manageable)
+- 100k FineWeb samples for Gaussian fitting (fineweb-edu, sample-10BT, seq_len=5, seed=42)
+- Three categories, 100 samples each:
+  - **Real:** first 100 from the 100k set, with their actual tokens
+  - **Random (diagonal):** N(mean, diag(var)) — matches per-entry mean and variance, ignores all correlations
+  - **Random (full covariance):** N(mean, Σ) — matches mean and all pairwise linear correlations, including cross-position correlations induced by attention in layers 0–5
+- Metric: Jacobian Frobenius norm ||J||_F where J = ∂(final-position logits) / ∂(all-position activations at layer 6)
+- Estimated via Hutchinson's trace estimator: ||J||_F² = E[||Jv||²] where v ~ N(0, I), using 100 Gaussian probe vectors
+  - Each ||Jv|| computed via forward-mode AD (torch.func.jvp) — exact, not finite-difference
+  - Worst-case relative error with 100 probes: ~√(2/100) ≈ 14% on ||J||_F², ~7% on ||J||_F (assumes spectrum dominated by one singular value; error smaller if spectrum is spread out)
+- Covariance fitted on GPU via torch (6.7s for 100k × 6400), Cholesky decomposition for sampling
+
+### Results
+- **Jacobian Frobenius norm ||J||_F:**
+  - Real: mean=114.8, std=53.5
+  - Random (diagonal): mean=376.9, std=95.6
+  - Random (full cov): mean=285.8, std=70.1
+- **Fitted covariance rank:** 3837 out of 6400 (N=100k >> D=6400, so rank deficiency reflects the data, not sample size)
+
+![frobenius_norm_v2.png](results/jacobian_v2/frobenius_norm_v2.png)
+
+### Observations
+- Real activations have ~3x lower Frobenius norm than random (both flavors). Strong separation — distributions barely overlap.
+- Full covariance (285.8) is closer to real than diagonal (376.9). Correlations matter, but don't close the gap. Going from "no correlations" to "all linear correlations" gets us about 35% of the way from diagonal to real.
+- Compared to v1 (final-token-only, 2026-01-30): real went from 57.3→114.8, which is expected since D went from 1280→6400 (more entries in J). The ratio real/random decreased from ~9x (v1) to ~3x (v2), suggesting the all-positions setup is a harder test — the scaffolding of real context was doing a lot of work in v1.
+- Covariance rank 3837/6400 means real activations live in a ~60%-dimensional subspace. The remaining ~40% of directions have zero variance.
+- Why Gaussians aren't enough: under the superposition hypothesis, real activations are sparse combinations of features. A Gaussian fundamentally cannot capture sparsity — Gaussian marginals are bell-shaped, while sparse coordinates have a spike at zero plus rare large values. First and second moments cannot encode this structure. This suggests higher-moment properties (kurtosis, sparsity) are essential for what makes activations "real."
+
+### Technical issues
+- `torch.func.jvp` incompatible with SDPA → wrapped in `sdpa_kernel(torch.nn.attention.SDPBackend.MATH)` to fall back to naive attention
+- `np.cov` on CPU impossibly slow for 100k × 6400 → switched to GPU torch: `cov = (centered.T @ centered) / (N-1)`, completed in 6.7s
+- Disk quota on RunPod → combined stages 1+2 to avoid saving the 100k × 6400 tensor (~2.4GB)
+- Pod expired mid-run → resumed from checkpoint on new pod
+
+### Code
+- `src/model.py` — added `forward_from_layer_allpos`, `extract_activations_allpos`
+- `src/data.py` — added `load_fineweb_fixed_length`, `sample_random_activations_v2`
+- `src/analysis.py` — added `estimate_frobenius_norm_hutchinson` (Hutchinson + forward-mode AD)
+- `src/visualization.py` — added `plot_three_way_comparison`
+- `scripts/run_jacobian_v2.py` — experiment runner with 4-stage checkpointing and resume
+- Results in `results/jacobian_v2/`
+
+### Next steps
+- Explore local neighborhood of real activations: start from a real point, perturb in various directions, measure how quickly Jacobian norm increases as you leave the "real region"
+- Gradient descent on Jacobian norm: start from a random point, optimize to minimize ||J||_F, see if it converges to something real-like
+- Consider non-Gaussian sampling: sparse priors, learned distributions, to test whether sparsity is the missing ingredient
+
+---
+
 ## 2026-01-30: Real vs Random Activation Comparison (GPT-2 Large, Layer 6)
 
 ### Goal

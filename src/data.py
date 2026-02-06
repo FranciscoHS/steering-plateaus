@@ -59,6 +59,116 @@ def load_fineweb_samples(n, tokenizer, min_tokens=10, max_tokens=512, seed=42):
     return texts, token_counts
 
 
+def load_fineweb_fixed_length(n, tokenizer, seq_len=5, seed=42):
+    """
+    Load FineWeb samples tokenized to exactly seq_len tokens.
+
+    Truncates longer texts to seq_len. Skips texts shorter than seq_len.
+
+    Args:
+        n: Number of samples to return
+        tokenizer: GPT-2 tokenizer
+        seq_len: Exact token length for all sequences
+        seed: Random seed for shuffling
+
+    Returns:
+        token_ids_list: list of n tensors, each [seq_len]
+    """
+    dataset = load_dataset(
+        "HuggingFaceFW/fineweb-edu",
+        name="sample-10BT",
+        split="train",
+        streaming=True
+    )
+    dataset = dataset.shuffle(seed=seed, buffer_size=10000)
+
+    token_ids_list = []
+
+    for sample in dataset:
+        text = sample['text']
+        tokens = tokenizer(text, truncation=True, max_length=seq_len,
+                          return_tensors='pt')
+        ids = tokens['input_ids'].squeeze(0)
+
+        if len(ids) >= seq_len:
+            token_ids_list.append(ids[:seq_len])
+
+        if len(token_ids_list) >= n:
+            break
+
+        if len(token_ids_list) % 10000 == 0 and len(token_ids_list) > 0:
+            print(f"  Collected {len(token_ids_list)}/{n} sequences...")
+
+    print(f"Loaded {len(token_ids_list)} FineWeb samples (each {seq_len} tokens)")
+    return token_ids_list
+
+
+def sample_random_activations_v2(real_activations, n, mode='full', seed=42, device='cpu'):
+    """
+    Sample random activations from a Gaussian fitted to real activations.
+
+    Supports both diagonal and full covariance. Works with concatenated
+    all-position activations (seq_len * hidden_dim dimensional).
+    Uses torch for covariance computation (GPU-accelerated when device='cuda').
+
+    Args:
+        real_activations: [N, D] tensor (D = seq_len * hidden_dim)
+        n: Number of random samples to generate
+        mode: 'diagonal' or 'full'
+        seed: Random seed
+        device: torch device for computation ('cuda' to use GPU)
+
+    Returns:
+        random_activations: [n, D] tensor (CPU)
+        stats: dict with fitting info
+    """
+    torch.manual_seed(seed)
+
+    if not isinstance(real_activations, torch.Tensor):
+        real_activations = torch.tensor(real_activations, dtype=torch.float32)
+
+    data = real_activations.to(device)
+    N, D = data.shape
+    mean = data.mean(dim=0)
+
+    if mode == 'diagonal':
+        var = data.var(dim=0, unbiased=True)
+        print(f"Diagonal covariance: D={D}, variance range=[{var.min().item():.4f}, {var.max().item():.4f}]")
+        # Sample: each entry independently from N(mean_i, var_i)
+        samples = torch.randn(n, D, device=device) * var.sqrt() + mean
+        stats = {'mode': 'diagonal'}
+
+    elif mode == 'full':
+        if N <= D:
+            print(f"Warning: N={N} <= D={D}, covariance will be rank-deficient")
+        # Compute covariance on GPU: cov = (X - mean)^T (X - mean) / (N - 1)
+        centered = data - mean.unsqueeze(0)
+        print(f"Computing covariance matrix ({D}x{D}) from {N} samples...")
+        cov = (centered.T @ centered) / (N - 1)
+        print(f"Computing Cholesky decomposition...")
+        # Cholesky for sampling: sample = mean + L @ z, where z ~ N(0, I)
+        try:
+            L = torch.linalg.cholesky(cov)
+        except torch.linalg.LinAlgError:
+            # Add small regularization if not positive definite (numerical issues)
+            reg = 1e-6 * torch.trace(cov) / D
+            print(f"Cholesky failed, adding regularization eps={reg.item():.2e}")
+            L = torch.linalg.cholesky(cov + reg * torch.eye(D, device=device))
+        z = torch.randn(n, D, device=device)
+        samples = mean.unsqueeze(0) + z @ L.T
+        rank = torch.linalg.matrix_rank(cov).item()
+        print(f"Full covariance: D={D}, rank={rank}, N={N}")
+        stats = {'mode': 'full', 'rank': rank}
+
+    else:
+        raise ValueError(f"Unknown mode: {mode}. Use 'diagonal' or 'full'.")
+
+    random_activations = samples.cpu()
+    print(f"Sampled {n} random activations (mode={mode})")
+
+    return random_activations, stats
+
+
 def sample_random_activations(real_activations, n, seed=42):
     """
     Sample random activations from a Gaussian fitted to real activations.
