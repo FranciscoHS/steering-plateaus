@@ -1,19 +1,86 @@
 """
-Model loading and layer-wise forward pass utilities for GPT-2.
+Model loading and layer-wise forward pass utilities.
 
-Uses HuggingFace transformers directly (can switch to transformer_lens later).
+Supports GPT-2 family and Llama-architecture models (Qwen3, etc.).
+Uses HuggingFace transformers directly.
 """
 
 import torch
-from transformers import GPT2LMHeadModel, GPT2Tokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, GPT2LMHeadModel, GPT2Tokenizer
+
+
+# Short names → HuggingFace model IDs
+MODEL_ALIASES = {
+    'qwen3-0.6b': 'Qwen/Qwen3-0.6B',
+}
+
+
+def _get_blocks(model):
+    """Get the list of transformer blocks."""
+    if hasattr(model, 'transformer'):  # GPT-2
+        return model.transformer.h
+    elif hasattr(model, 'model') and hasattr(model.model, 'layers'):  # Llama/Qwen
+        return model.model.layers
+    raise ValueError(f"Unknown model architecture: {type(model)}")
+
+
+def _get_final_norm(model):
+    """Get the final layer norm."""
+    if hasattr(model, 'transformer'):  # GPT-2
+        return model.transformer.ln_f
+    elif hasattr(model, 'model') and hasattr(model.model, 'norm'):  # Llama/Qwen
+        return model.model.norm
+    raise ValueError(f"Unknown model architecture: {type(model)}")
+
+
+def _get_lm_head(model):
+    """Get the language model head (unembedding)."""
+    return model.lm_head
+
+
+def _is_rope_model(model):
+    """True for models that need explicit position_embeddings (Llama/Qwen)."""
+    return hasattr(model, '_plateau_info') and model._plateau_info['model_type'] == 'llama'
+
+
+def _get_position_embeddings(model, hidden_states):
+    """Compute (cos, sin) position embeddings for RoPE models.
+
+    Args:
+        model: Llama/Qwen model
+        hidden_states: [batch, seq_len, d_model] - used to infer seq_len and device
+
+    Returns:
+        position_embeddings: (cos, sin) tuple, each [batch, seq_len, head_dim]
+    """
+    position_ids = torch.arange(hidden_states.shape[1], device=hidden_states.device).unsqueeze(0)
+    return model.model.rotary_emb(hidden_states, position_ids)
+
+
+def _run_block(block, hidden, rope, pos_emb=None):
+    """Run a single transformer block, handling different return conventions.
+
+    GPT-2 blocks return a tuple (hidden_states, ...).
+    Llama/Qwen blocks return a plain tensor.
+    """
+    if rope:
+        result = block(hidden, position_embeddings=pos_emb)
+    else:
+        result = block(hidden)
+    # Unpack tuple if needed (GPT-2 style)
+    if isinstance(result, tuple):
+        return result[0]
+    return result
 
 
 def load_model(model_name='gpt2', device=None):
     """
-    Load GPT-2 model and tokenizer.
+    Load model and tokenizer.
 
     Args:
-        model_name: HuggingFace model name ('gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl')
+        model_name: Short name or HuggingFace model name.
+            GPT-2: 'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'
+            Qwen: 'qwen3-0.6b'
         device: torch device (auto-detected if None)
 
     Returns:
@@ -22,13 +89,32 @@ def load_model(model_name='gpt2', device=None):
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    model = GPT2LMHeadModel.from_pretrained(model_name).to(device)
-    tokenizer = GPT2Tokenizer.from_pretrained(model_name)
+    hf_name = MODEL_ALIASES.get(model_name, model_name)
+
+    # Detect architecture type
+    is_gpt2 = model_name.startswith('gpt2')
+
+    if is_gpt2:
+        model = GPT2LMHeadModel.from_pretrained(hf_name).to(device)
+        tokenizer = GPT2Tokenizer.from_pretrained(hf_name)
+        model_type = 'gpt2'
+        d_model = model.config.n_embd
+    else:
+        model = AutoModelForCausalLM.from_pretrained(hf_name, torch_dtype=torch.float32).to(device)
+        tokenizer = AutoTokenizer.from_pretrained(hf_name)
+        model_type = 'llama'  # Llama-architecture (Qwen3, Llama, etc.)
+        d_model = model.config.hidden_size
+
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
     model.eval()
 
-    # Freeze model weights - we only optimize paths, not model
     for param in model.parameters():
         param.requires_grad = False
+
+    # Attach metadata for dispatch
+    model._plateau_info = {'model_type': model_type, 'd_model': d_model}
 
     return model, tokenizer, device
 
@@ -112,7 +198,7 @@ def forward_from_layer(model, context, point, start_layer):
     Generalizes forward_from_layer1 to start from any layer.
 
     Args:
-        model: GPT-2 model
+        model: GPT-2 or Llama-arch model
         context: [1, seq_len-1, hidden_dim] - Prefix residual stream at start_layer
         point: [n_points, 1, hidden_dim] - Final-token activation(s)
         start_layer: Layer index (0-indexed). Runs blocks [start_layer+1:] onward.
@@ -125,11 +211,16 @@ def forward_from_layer(model, context, point, start_layer):
     context_batch = context.expand(n_points, -1, -1)
     hidden = torch.cat([context_batch, point], dim=1)
 
-    for block in model.transformer.h[start_layer + 1:]:
-        hidden = block(hidden)[0]
+    blocks = _get_blocks(model)
+    rope = _is_rope_model(model)
+    if rope:
+        pos_emb = _get_position_embeddings(model, hidden)
 
-    hidden = model.transformer.ln_f(hidden)
-    logits = model.lm_head(hidden[:, -1, :])
+    for block in blocks[start_layer + 1:]:
+        hidden = _run_block(block, hidden, rope, pos_emb if rope else None)
+
+    hidden = _get_final_norm(model)(hidden)
+    logits = _get_lm_head(model)(hidden[:, -1, :])
 
     return logits
 
@@ -142,19 +233,24 @@ def forward_from_layer_to_final(model, context, point, start_layer):
     Differentiable w.r.t. point — uses only out-of-place ops.
 
     Args:
-        model: GPT-2 model
+        model: GPT-2 or Llama-arch model
         context: [1, seq_len-1, hidden_dim] - Prefix residual stream at start_layer
-        point: [1, 1, hidden_dim] - Last-token activation (may carry gradients)
+        point: [n, 1, hidden_dim] - Last-token activation (may carry gradients)
         start_layer: Layer index (0-indexed). Runs blocks [start_layer+1:] onward.
 
     Returns:
-        final_act: [1, hidden_dim] - Last-token residual stream after final block
+        final_act: [n, hidden_dim] - Last-token residual stream after final block
     """
     context_batch = context.expand(point.shape[0], -1, -1)
     hidden = torch.cat([context_batch, point], dim=1)
 
-    for block in model.transformer.h[start_layer + 1:]:
-        hidden = block(hidden)[0]
+    blocks = _get_blocks(model)
+    rope = _is_rope_model(model)
+    if rope:
+        pos_emb = _get_position_embeddings(model, hidden)
+
+    for block in blocks[start_layer + 1:]:
+        hidden = _run_block(block, hidden, rope, pos_emb if rope else None)
 
     return hidden[:, -1, :]
 
@@ -168,7 +264,7 @@ def forward_from_layer_allpos(model, hidden_states, start_layer):
     remaining layers + ln_f + lm_head.
 
     Args:
-        model: GPT-2 model
+        model: GPT-2 or Llama-arch model
         hidden_states: [batch, seq_len, hidden_dim] - Full residual stream at start_layer
         start_layer: Layer index (0-indexed). Runs blocks [start_layer+1:] onward.
 
@@ -177,11 +273,16 @@ def forward_from_layer_allpos(model, hidden_states, start_layer):
     """
     hidden = hidden_states
 
-    for block in model.transformer.h[start_layer + 1:]:
-        hidden = block(hidden)[0]
+    blocks = _get_blocks(model)
+    rope = _is_rope_model(model)
+    if rope:
+        pos_emb = _get_position_embeddings(model, hidden)
 
-    hidden = model.transformer.ln_f(hidden)
-    logits = model.lm_head(hidden[:, -1, :])
+    for block in blocks[start_layer + 1:]:
+        hidden = _run_block(block, hidden, rope, pos_emb if rope else None)
+
+    hidden = _get_final_norm(model)(hidden)
+    logits = _get_lm_head(model)(hidden[:, -1, :])
 
     return logits
 
@@ -211,8 +312,8 @@ def extract_activations(model, tokenizer, texts, layer, device, batch_size=1):
     activation at the specified layer. Stores results on CPU to save GPU memory.
 
     Args:
-        model: GPT-2 model
-        tokenizer: GPT-2 tokenizer
+        model: GPT-2 or Llama-arch model
+        tokenizer: tokenizer
         texts: list of strings
         layer: transformer block index (0-indexed)
         device: torch device
@@ -247,8 +348,8 @@ def extract_activations_allpos(model, tokenizer, token_ids_list, layer, device, 
     Extract residual stream activations at ALL positions for fixed-length token sequences.
 
     Args:
-        model: GPT-2 model
-        tokenizer: GPT-2 tokenizer
+        model: GPT-2 or Llama-arch model
+        tokenizer: tokenizer
         token_ids_list: list of [seq_len] tensors (all same length)
         layer: transformer block index (0-indexed)
         device: torch device

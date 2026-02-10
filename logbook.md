@@ -1,5 +1,206 @@
 # Steering Plateaus Logbook
 
+## 2026-02-10: Spherical Perturbation Sweeps & Shifted Activation Plateau Tests
+
+### Goal
+
+Directly measure plateau behavior by perturbing activations on the constant-norm sphere and observing downstream effects. This goes beyond the Jacobian proxy — we're measuring the actual phenomenon: real activations should be robust to small perturbations (flat L2 / KL response), then show an abrupt transition. Random activations should respond immediately. Then test whether activations shifted by the optimized delta vectors (from the 2026-02-09 delta optimization) also exhibit plateau behavior.
+
+Meeting with Stefan generated three experimental directions:
+1. Test whether shifted activations (from delta optimization) show plateau behavior
+2. Find a steering vector via contrastive means, check whether steered activations have plateaus, and whether optimizing for plateau-ness improves steering
+3. How does steering generally line up with plateau structure?
+
+Today focused on (1) and beginning (3).
+
+### Experiment 1: GPT-2 Large — Real vs Random (spherical perturbations)
+
+**Setup:**
+- GPT-2 Large, layer 6, seq_len=5, last token only
+- 100 real activations (FineWeb), 100 covariance-matched random activations
+- Spherical perturbation: a_perturbed = cos(theta) * a + sin(theta) * ||a|| * v_perp, preserving activation norm
+- 60 angles from 3 to 180 degrees, 10 random orthogonal directions per activation
+- Metrics: L2 distance on final-layer activations (pre-ln_f), KL divergence on logits
+- Also ran with norm-matched randoms and in both same-context / cross-context modes
+
+**Results (cov-matched, same-context):**
+![sweep_median.png](results/perturbation_sweep_spherical/gpt2-large_cov_matched/sweep_median.png)
+![sweep_individual.png](results/perturbation_sweep_spherical/gpt2-large_cov_matched/sweep_individual.png)
+
+**Observations:**
+- Clear plateau behavior for real activations. L2 distance stays near zero up to ~40 degrees, then rises steeply. KL divergence is essentially zero until ~50 degrees, then jumps sharply.
+- Random activations (cov-matched) show immediate, roughly linear L2 response from the start. KL divergence stays very low — the model doesn't "care" about perturbations to random activations because it's already in a low-confidence state.
+- The KL plot is especially striking: real activations have a clear step function (flat → jump at ~50 degrees), while random activations barely register any KL divergence at all. This inverts the naive expectation — perturbations to real activations cause *more* behavioral change, but only beyond a threshold. Below that threshold, real activations are more robust.
+- Same-context vs cross-context: ran both, no meaningful difference. Makes sense — spherical perturbations are large enough to overwhelm any context-coherence bonus.
+- Norm-matched vs cov-matched randoms: similar pattern. Cov-matched randoms are slightly more real-like (as expected from the Jacobian experiments) but the qualitative picture is the same.
+
+### Experiment 2: GPT-2 Large — Shifted activations (delta optimization)
+
+Tested whether activations shifted by the optimized delta vectors from 2026-02-09 retain plateau behavior.
+
+**Real vs Shifted (v2, matched Jacobian):**
+![sweep_median_shifted.png](results/perturbation_sweep_spherical/gpt2-large_shifted/sweep_median.png)
+
+The shifted activations do show plateau behavior, but with clear differences from real:
+- L2 distance: shifted curve rises slightly earlier and more gradually than real
+- KL divergence: shifted activations have a plateau, but it's shorter — the jump happens at ~40 degrees rather than ~50
+
+**3-way comparison (real vs shifted vs random):**
+![3way_median.png](results/perturbation_sweep_spherical/gpt2-large_3way_median.png)
+
+Strengthens the case for shifted activations being real-like. Clear ordering: real > shifted > random in terms of plateau-ness. Shifted activations are much closer to real than to random, especially in KL divergence where they share the same qualitative step-function shape. Random activations are flat in KL (no plateau at all).
+
+**4-way comparison (adding v1, minimized Jacobian):**
+![4way_median.png](results/perturbation_sweep_spherical/gpt2-large_4way_median.png)
+
+- v1 (minimized Jacobian): *longer* plateaus than v2 (matched Jacobian), but still slightly shorter than real
+- v2 (matched Jacobian): shorter plateaus than v1
+- Both shifted variants clearly plateau-like; both clearly distinguishable from random
+- Ordering by plateau length: real > v1 (minimized) > v2 (matched) >> random
+
+**Interpretation:** Jacobian norm is a meaningful but imperfect proxy for plateau-ness. Minimizing the Jacobian (v1) actually produces more plateau-like activations than matching the real Jacobian norm (v2). This makes some intuitive sense — lower Jacobian = flatter landscape = longer plateau. But even v1 doesn't fully reproduce real plateau behavior, suggesting plateau structure depends on more than just Jacobian norm (e.g., higher-order geometry, specific directional properties).
+
+### Experiment 3: Qwen3-0.6B — Real vs Random (spherical perturbations)
+
+**Setup:**
+- Qwen3-0.6B (28 layers, d_model=1024), layer 2
+- 100 real activations, 100 covariance-matched random activations (fitted from 2000 FineWeb samples)
+- Same spherical perturbation protocol as GPT-2
+- Mean activation norm: 13.06
+
+**Results:**
+![qwen_sweep_median.png](results/perturbation_sweep_spherical/qwen3-0.6b_cov_matched/sweep_median.png)
+
+**Observations:**
+- Clear separation between real and random, confirming plateau behavior generalizes to Qwen3-0.6B
+- Both L2 distance and KL divergence show real activations being more robust at small angles
+- The separation is less dramatic than GPT-2 Large — random activations here are more "almost plateau-like", though still clearly distinguishable
+- This may reflect layer 2 being very early (7% depth), where activations haven't been processed much yet. Or Qwen just having different geometry.
+- No shifted-activation comparison done yet for Qwen
+
+### Experiment 4: Qwen3-0.6B — Steering vs Random Perturbation
+
+**Setup:**
+- Steering vector: difference-of-means on 50 matched English/Chinese prompt pairs, extracted at layer 14 (mid-network), norm=16.0
+- Applied spherically to the same real activations (layer 2) used in the perturbation sweep — project steering direction orthogonal to each activation, then rotate on the sphere
+- Same angle range (3-180 degrees), same metrics
+- Three conditions: real + language direction (green), real + random directions (blue), random cov-matched + random directions (red)
+
+**Results:**
+![steering_vs_random_median.png](results/steering_vs_plateau/qwen3-0.6b/steering_vs_random_median.png)
+
+The steering curve looks very similar to the random-directions curve — if anything, slightly *more* plateau-like. This is unexpected: if plateaus reflected error-correction along feature directions, we'd expect the language direction to break through the plateau earlier/more steeply than random directions. Instead, the model treats the language direction roughly the same as any other direction within the plateau.
+
+**Steering verification (generation):**
+
+Steering does work — the model switches languages at sufficient magnitude:
+- English to Chinese:
+  - mag=0-2: stays English
+  - mag=5: switches to Chinese (all 3 prompts)
+  - mag=10-15: Chinese but degrading
+  - mag=20+: breaks down
+- Chinese to English:
+  - mag=0-2: stays Chinese
+  - mag=5: switches to English
+  - mag=10+: English but degrading
+
+The transition happens at mag ~5, and the layer-2 activation norm for FineWeb sequences is ~13. So the steering magnitude at which language switches is about 5/13 = 38% of activation norm. In angular terms on the sphere, that's arcsin(5/13) ~ 23 degrees. Looking at the plot, 23 degrees is well inside the plateau region where both the steering and random-direction curves are still flat. This means the model's behavioral response to steering (language switch) happens at perturbation magnitudes where the overall output distribution (measured by KL/L2) hasn't changed much yet. The plateau is not "protecting" against the steering — the model is responding to the specific direction while remaining broadly stable.
+
+**Interpretation:** Plateaus appear to be direction-independent at this layer. The model is equally robust to perturbations in the language direction as in random directions, at least as measured by L2/KL on the full output. But targeted behavior (language choice) changes at a magnitude where the aggregate metrics are still flat. This suggests plateaus reflect a kind of general stability rather than direction-specific error correction — and that behaviorally meaningful changes can happen within a plateau (the overall distribution stays similar, but specific features of that distribution shift).
+
+### Code
+- `scripts/run_perturbation_sweep_spherical.py` — spherical perturbation experiment (all variants)
+- `scripts/run_steering_vs_plateau.py` — steering comparison experiment
+- Results in `results/perturbation_sweep_spherical/` and `results/steering_vs_plateau/`
+
+### Cost
+- RTX 4090 at $1.49/hr. GPT-2 sweeps ~3 min each, Qwen ~6 min each. Total pod time ~2 hours including iterations.
+
+---
+
+## 2026-02-09: Delta Optimization v1 — Finding Plateau-Preserving Directions
+
+### Background
+
+Stefan proposed the following experiment: optimize a single vector delta such that a_i + delta has a similar Jacobian to real activations, for a large set of real activations a_i. The idea is that delta would move real activations to other real-like locations — if such a direction exists, it should roughly correspond to a feature (per the linear representation hypothesis). If the optimization succeeds, we can try to interpret the vector.
+
+### Methodological changes
+
+**Cross-context evaluation.** Previous experiments evaluated real activations with their own context, which gives them a coherence bonus: all positions at layer 6 were produced together by the same forward pass. Random/shifted activations can't have this bonus, making the comparison unfair. Any observed difference could be this coherence bonus rather than a property of the point's location. Cross-context levels the playing field: all categories are evaluated with a context that isn't "theirs." If real activations still show lower Jacobian norms, it's about the points themselves.
+
+**Activation space throughout.** Jacobian maps from layer 6 (last token) to final layer pre-unembedding (last token), staying fully in activation space. This avoids conceptual complications from projecting into vocabulary space via the unembedding, and is cheaper: activation space is 1280-dimensional vs 50k for logits.
+
+### Setup
+- GPT-2 Large, layer 6, sequence length 5, last token only
+- 100 activations (for optimization) + 100 separate sequences for cross-contexts
+- **Projected gradient descent:** fix ||delta|| = r, optimize direction only. After each Adam step, project back to the sphere. This eliminates the trivial delta=0 solution.
+- r set to mean pairwise L2 distance between real activations (~66.4). Rationale: too small and we're just staying in the same plateau (learning nothing); too large and the task may be impossible. The typical distance between real activations is a natural starting point.
+- Jacobian estimation: Hutchinson with 5 probes during optimization, 100 probes during evaluation
+- Mini-batch size 10 (SGD works well with noisy estimates)
+- Adam, lr=0.01, 1000 steps
+- `create_graph=True` in the backward pass so PyTorch tracks how it computed the Jacobian, enabling a second backward through the Jacobian estimate for the optimization loss
+
+### Accidental objective mismatch
+
+The intended goal was to minimize the *difference* between the shifted Jacobian norm and the mean real Jacobian norm (matching loss). What was actually implemented in v1 was minimizing the Jacobian norm itself. This is a different objective: aggressively seeking low-sensitivity regions rather than matching real-activation-like sensitivity. Still potentially meaningful, but not quite what we meant.
+
+### Results
+
+**Training dynamics:**
+![training_r66.png](results/delta_opt/training_r66.png)
+- The direction plot (rightmost, cosine similarity between successive iterations) is most informative. The majority of directional change occurs in the first ~50 steps; the optimizer then settles into a good direction and makes small refinements.
+- This suggests we might get away with far fewer steps (e.g. 200) for exploratory runs, though dangerous to extrapolate from one run.
+
+**Evaluation (cross-context, 100 Hutchinson probes):**
+![eval_r66.png](results/delta_opt/eval_r66.png)
+- Real (cross-context): mean=171.6, std=34.0
+- Shifted (a_i + delta): mean=17.5, std=7.0
+- The optimization succeeds at its (accidental) goal: Jacobian norms are driven far below real. It also drastically reduces variance (std 34 → 7), which is an even bigger relative change than for the mean.
+
+**Projection analysis:**
+![projection_analysis.png](results/delta_opt/projection_analysis.png)
+- Projecting real activations onto the found direction shows low similarity — the direction isn't aligned with the real activation distribution. Though this doesn't rule out it being meaningful for activations outside this small dataset.
+
+**Steering experiments:**
+- Delta norm: 66.4
+- Prompt: "The capital of France is"
+  - normal: "the capital of France.\n\nThe capital of France is the capital of France.\n\nThe"
+  - mag=0.1: same as normal
+  - mag=0.25: "the capital of the world. It is the capital of the world. It is the capital of the"
+  - mag=0.5: same as mag=0.25
+- Prompt: "Scientists recently discovered that"
+  - normal: "the brain's reward system is not only involved in the rewarding effects of drugs, but also in the"
+  - mag=0.1: "the brain's ability to process information is affected by the amount of time it spends awake."
+  - mag=0.25: "the brain's ability to process information is affected by the amount of dopamine in the brain."
+  - mag=0.5: "the brain's ability to detect and respond to the environment is impaired in people with autism."
+- No clear interpretable pattern. Would need more data, or perhaps this direction (which minimizes rather than matches Jacobian) isn't the right one to interpret.
+
+### Observations
+- The optimization finds a direction quickly (~50 steps) and then refines. This is encouraging for computational feasibility.
+- Shifted activations have *much lower* Jacobians than real activations, rather than matching them. This is the wrong objective — we want to match real, not beat it. v2 (matching loss) should fix this.
+- The low projections onto real activations are somewhat expected: this direction was optimized for a different criterion (minimal Jacobian), not for being a "real feature direction."
+- Cross-context reference norms (~172) are higher than same-context norms from earlier experiments (~115 in v2 all-positions, ~57 in v1 single-position). This makes sense: cross-context removes the coherence bonus.
+
+### Cost
+~$2.60 (RTX 4090 at $1.49/hr, ~1h45m)
+
+### Next steps
+- **v2: matching loss** — minimize (||J(a_i + delta)||_F - target)^2 where target is the mean real Jacobian norm. This is the experiment we actually meant to run.
+- **Interpretation:** if v2 succeeds, try to interpret the direction. Two ideas:
+  1. Steer the model with this vector and see if outputs change in an understandable way
+  2. Per the linear representation hypothesis, the direction should be a feature. Compute cosine similarity of the direction with different inputs' activations — expect it to be high for inputs that activate this feature. This could even reveal what the feature is.
+- **Sweep over r:** different magnitudes should yield different directions; some r values should make the optimization impossible.
+- **Fewer steps:** test whether 200 steps suffices for reasonable results.
+
+### Code
+- `scripts/run_delta_optimization.py` — v1 experiment runner (minimization loss)
+- `scripts/run_delta_optimization_v2.py` — v2 experiment runner (matching loss, not yet run)
+- `src/model.py` — added `forward_from_layer_to_final` for activation-space Jacobians
+- `src/analysis.py` — added `compute_jacobian_norm_vjp`
+- Results in `results/delta_opt/`
+
+---
+
 ## 2026-02-06: Jacobian Analysis v2 — All-Positions Patching
 
 ### Goal

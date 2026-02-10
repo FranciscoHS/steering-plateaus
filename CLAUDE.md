@@ -7,6 +7,8 @@ I am Francisco, a researcher with a PhD in Quantum Info who is now working on me
 
 **Results formatting:** When presenting experiment results, use plain markdown bullet lists (not tables) so Francisco can easily copy them into his logbook notes. Tables render poorly when copy-pasted. Keep formatting compact — no blank lines between sections or between the last bullet and the next heading.
 
+**Plans:** When creating plans (via plan mode or otherwise), always save a copy to the `Plans/` folder in the project root so Francisco can find them easily.
+
 ## Project Overview
 
 This project investigates what distinguishes real activations (arising from actual inputs) from arbitrary points in activation space in language models. We want to characterize the geometric properties of real activations, random activations, and boundary points (identified during interpolation between real activations).
