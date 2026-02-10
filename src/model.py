@@ -134,6 +134,31 @@ def forward_from_layer(model, context, point, start_layer):
     return logits
 
 
+def forward_from_layer_to_final(model, context, point, start_layer):
+    """
+    Forward from layer L to final transformer block (no ln_f, no unembedding).
+
+    Returns last-token residual stream after the final transformer block.
+    Differentiable w.r.t. point — uses only out-of-place ops.
+
+    Args:
+        model: GPT-2 model
+        context: [1, seq_len-1, hidden_dim] - Prefix residual stream at start_layer
+        point: [1, 1, hidden_dim] - Last-token activation (may carry gradients)
+        start_layer: Layer index (0-indexed). Runs blocks [start_layer+1:] onward.
+
+    Returns:
+        final_act: [1, hidden_dim] - Last-token residual stream after final block
+    """
+    context_batch = context.expand(point.shape[0], -1, -1)
+    hidden = torch.cat([context_batch, point], dim=1)
+
+    for block in model.transformer.h[start_layer + 1:]:
+        hidden = block(hidden)[0]
+
+    return hidden[:, -1, :]
+
+
 def forward_from_layer_allpos(model, hidden_states, start_layer):
     """
     Forward pass from an arbitrary layer, patching ALL positions.

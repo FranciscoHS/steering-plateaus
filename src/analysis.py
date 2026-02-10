@@ -12,7 +12,8 @@ import torch
 from torch.func import jvp
 import numpy as np
 from scipy.sparse.linalg import eigsh, LinearOperator
-from .model import forward_from_layer1, forward_from_layer, forward_from_layer_allpos, get_logits_at_point
+from .model import (forward_from_layer1, forward_from_layer, forward_from_layer_allpos,
+                     forward_from_layer_to_final, get_logits_at_point)
 
 
 def compute_velocity_profile(model, prefix_resid, path):
@@ -316,6 +317,49 @@ def estimate_frobenius_norm(model, context, point, layer, n_samples=100, epsilon
     mean_sq = np.mean(sensitivities ** 2)
     frobenius_sq = d * mean_sq
     return np.sqrt(frobenius_sq)
+
+
+def compute_jacobian_norm_vjp(model, context, point, layer, n_probes=100):
+    """
+    Estimate ||J||_F for J mapping layer L last-token → final layer last-token.
+
+    Uses VJP (backward-mode AD) with Hutchinson estimator. Standard autograd,
+    no torch.func needed.
+
+    Args:
+        model: GPT-2 model
+        context: [1, seq_len-1, hidden_dim] - Prefix at layer L (detached)
+        point: [hidden_dim] tensor - Last-token activation (detached)
+        layer: Start layer index
+        n_probes: Number of Hutchinson probes
+
+    Returns:
+        frobenius_norm: estimated ||J||_F
+        frobenius_sq_std: std of per-probe ||J||_F^2 estimates
+    """
+    d_model = point.shape[-1]
+    device = point.device
+
+    estimates = []
+    for k in range(n_probes):
+        point_var = point.clone().reshape(1, 1, d_model).requires_grad_(True)
+
+        with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
+            final_act = forward_from_layer_to_final(model, context, point_var, layer)
+
+        # VJP: random probe in output space
+        u = torch.randn_like(final_act)
+        s = (final_act * u).sum()
+        g = torch.autograd.grad(s, point_var)[0]
+
+        estimates.append((g ** 2).sum().item())
+
+    estimates = np.array(estimates)
+    frob_sq = np.mean(estimates)
+    frob_norm = np.sqrt(max(frob_sq, 0))
+    frob_sq_std = np.std(estimates)
+
+    return frob_norm, frob_sq_std
 
 
 def compute_logit_entropy(model, context, point, layer):
