@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
 Steering vs plateau experiment: compare random spherical perturbations
-with steering along a meaningful feature direction (English↔Chinese).
+with steering along a meaningful feature direction.
 
 Steering vector extracted at layer 14 (mid-network), applied at layer 2
 (where existing spherical sweep was run).
 
 Usage:
     python scripts/run_steering_vs_plateau.py --model qwen3-0.6b
+    python scripts/run_steering_vs_plateau.py --model qwen3-0.6b --language dutch
 """
 
 import argparse
@@ -29,13 +30,27 @@ from src.model import (
     _get_final_norm, _get_lm_head,
 )
 from src.data import load_fineweb_fixed_length
-from data.bilingual_prompts import ENGLISH_PROMPTS, CHINESE_PROMPTS
+LANGUAGE_CONFIGS = {
+    'chinese': {
+        'module': 'data.bilingual_prompts',
+        'en_attr': 'ENGLISH_PROMPTS',
+        'other_attr': 'CHINESE_PROMPTS',
+        'label': 'en↔zh',
+    },
+    'dutch': {
+        'module': 'data.bilingual_prompts_dutch',
+        'en_attr': 'ENGLISH_PROMPTS',
+        'other_attr': 'DUTCH_PROMPTS',
+        'label': 'en↔nl',
+    },
+}
 
 
-def extract_steering_vector(model, tokenizer, device, extract_layer):
+def extract_steering_vector(model, tokenizer, device, extract_layer,
+                            en_prompts, other_prompts, label='en↔other'):
     """Compute language steering vector at extract_layer via difference-of-means.
 
-    Returns unit vector: mean(english) - mean(chinese), normalized.
+    Returns unit vector: mean(english) - mean(other_language), normalized.
     """
     def get_mean_activation(prompts):
         acts = []
@@ -47,10 +62,10 @@ def extract_steering_vector(model, tokenizer, device, extract_layer):
             acts.append(hidden[:, -1, :].squeeze(0).cpu())
         return torch.stack(acts).mean(dim=0)
 
-    print(f"Computing steering vector from {len(ENGLISH_PROMPTS)} prompt pairs at layer {extract_layer}...")
-    en_mean = get_mean_activation(ENGLISH_PROMPTS)
-    zh_mean = get_mean_activation(CHINESE_PROMPTS)
-    steering_vec = en_mean - zh_mean
+    print(f"Computing steering vector ({label}) from {len(en_prompts)} prompt pairs at layer {extract_layer}...")
+    en_mean = get_mean_activation(en_prompts)
+    other_mean = get_mean_activation(other_prompts)
+    steering_vec = en_mean - other_mean
     steering_norm = steering_vec.norm().item()
     steering_unit = steering_vec / steering_vec.norm()
     print(f"Steering vector norm: {steering_norm:.2f}")
@@ -131,6 +146,9 @@ def run_steering_sweep(model, context, activation, steering_dir, angles_rad,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', type=str, default='qwen3-0.6b')
+    parser.add_argument('--language', type=str, default='chinese',
+                        choices=list(LANGUAGE_CONFIGS.keys()),
+                        help='Target language for steering vector')
     parser.add_argument('--apply_layer', type=int, default=2,
                         help='Layer at which to apply perturbation/steering')
     parser.add_argument('--extract_layer', type=int, default=14,
@@ -145,14 +163,22 @@ def main():
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
+    # Load language-specific prompts
+    import importlib
+    lang_cfg = LANGUAGE_CONFIGS[args.language]
+    mod = importlib.import_module(lang_cfg['module'])
+    en_prompts = getattr(mod, lang_cfg['en_attr'])
+    other_prompts = getattr(mod, lang_cfg['other_attr'])
+    lang_label = lang_cfg['label']
+
     if args.results_dir is None:
-        args.results_dir = f'results/steering_vs_plateau/{args.model}'
+        args.results_dir = f'results/steering_vs_plateau/{args.model}_{args.language}'
     os.makedirs(args.results_dir, exist_ok=True)
 
     angles_deg = np.linspace(0, 180, args.n_angles + 1)[1:]
     angles_rad = np.deg2rad(angles_deg)
 
-    print(f"Config: model={args.model}, apply_layer={args.apply_layer}, "
+    print(f"Config: model={args.model}, language={args.language}, apply_layer={args.apply_layer}, "
           f"extract_layer={args.extract_layer}, n_act={args.n_act}, n_angles={len(angles_deg)}")
 
     # Load model
@@ -163,7 +189,8 @@ def main():
 
     # Extract steering vector at extract_layer
     steering_unit, steering_norm = extract_steering_vector(
-        model, tokenizer, device, args.extract_layer
+        model, tokenizer, device, args.extract_layer,
+        en_prompts, other_prompts, lang_label
     )
 
     # Extract activations at apply_layer
@@ -183,7 +210,7 @@ def main():
           f"std={cosines.std().item():.4f}, max={cosines.abs().max().item():.4f}")
 
     # Steering sweep
-    print(f"\n=== Steering sweep (en↔zh direction) ===")
+    print(f"\n=== Steering sweep ({lang_label} direction) ===")
     steer_l2 = np.zeros((args.n_act, len(angles_deg)))
     steer_kl = np.zeros((args.n_act, len(angles_deg)))
     t0 = time.time()
@@ -200,6 +227,8 @@ def main():
     # Save
     results = {
         'args': vars(args),
+        'language': args.language,
+        'lang_label': lang_label,
         'angles_deg': angles_deg,
         'angles_rad': angles_rad,
         'act_norm_mean': act_norm_mean,
