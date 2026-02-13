@@ -27,8 +27,8 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from src.model import (
-    load_model, forward_from_layer_to_final,
-    _get_final_norm, _get_lm_head,
+    load_model, forward_from_layer_to_final, forward_from_layer_to_layer,
+    _get_final_norm, _get_lm_head, _get_blocks,
 )
 from src.data import load_fineweb_fixed_length
 
@@ -41,8 +41,8 @@ def extract_context_and_activation(model, tokenizer, token_ids_list, layer, devi
         with torch.no_grad():
             outputs = model(batch_tokens, output_hidden_states=True)
         hidden = outputs.hidden_states[layer + 1]
-        all_contexts.append(hidden[:, :-1, :].cpu())
-        all_activations.append(hidden[:, -1, :].cpu())
+        all_contexts.append(hidden[:, :-1, :].float().cpu())
+        all_activations.append(hidden[:, -1, :].float().cpu())
     return torch.cat(all_contexts, 0), torch.cat(all_activations, 0)
 
 
@@ -72,7 +72,7 @@ def sample_orthogonal_directions(activations, n_dirs):
 
 
 def run_spherical_sweep(model, context, activation, v_perps, angles_rad,
-                        layer, device, n_dirs):
+                        layer, device, n_dirs, measure_layer=None):
     """Sweep spherical perturbations for one activation.
 
     a_perturbed = cos(theta) * a + sin(theta) * ||a|| * v_perp
@@ -85,11 +85,12 @@ def run_spherical_sweep(model, context, activation, v_perps, angles_rad,
     l2_dists = np.zeros((n_angles, n_dirs))
     kl_divs = np.zeros((n_angles, n_dirs))
 
-    ctx = context.unsqueeze(0).to(device)
-    a = activation.to(device)       # [d_model]
+    model_dtype = next(model.parameters()).dtype
+    ctx = context.unsqueeze(0).to(device=device, dtype=model_dtype)
+    a = activation.to(device=device, dtype=model_dtype)       # [d_model]
     R = a.norm()
     a_unit = a / R
-    vp = v_perps.to(device)          # [n_dirs, d_model]
+    vp = v_perps.to(device=device, dtype=model_dtype)          # [n_dirs, d_model]
 
     # Reference (unperturbed)
     with torch.no_grad():
@@ -97,7 +98,11 @@ def run_spherical_sweep(model, context, activation, v_perps, angles_rad,
         ref_final = forward_from_layer_to_final(model, ctx, ref_point, layer)
         ref_ln = _get_final_norm(model)(ref_final.unsqueeze(1)).squeeze(1)
         ref_logits = _get_lm_head(model)(ref_ln)
-        ref_log_probs = F.log_softmax(ref_logits, dim=-1)
+        ref_log_probs = F.log_softmax(ref_logits.float(), dim=-1)
+        if measure_layer is not None:
+            ref_measure = forward_from_layer_to_layer(model, ctx, ref_point, layer, measure_layer)
+        else:
+            ref_measure = ref_final
 
     for ang_idx, theta in enumerate(angles_rad):
         # a_perturbed = cos(theta) * a + sin(theta) * R * v_perp
@@ -109,11 +114,18 @@ def run_spherical_sweep(model, context, activation, v_perps, angles_rad,
 
         with torch.no_grad():
             pert_final = forward_from_layer_to_final(model, ctx, perturbed, layer)
-            l2_dists[ang_idx] = (pert_final - ref_final).norm(dim=-1).cpu().numpy()
 
+            # L2 at measure_layer (or final if not set)
+            if measure_layer is not None:
+                pert_measure = forward_from_layer_to_layer(model, ctx, perturbed, layer, measure_layer)
+            else:
+                pert_measure = pert_final
+            l2_dists[ang_idx] = (pert_measure - ref_measure).float().norm(dim=-1).cpu().numpy()
+
+            # KL always from final logits
             pert_ln = _get_final_norm(model)(pert_final.unsqueeze(1)).squeeze(1)
             pert_logits = _get_lm_head(model)(pert_ln)
-            pert_log_probs = F.log_softmax(pert_logits, dim=-1)
+            pert_log_probs = F.log_softmax(pert_logits.float(), dim=-1)
             ref_probs = ref_log_probs.exp()
             kl = (ref_probs * (ref_log_probs - pert_log_probs)).sum(dim=-1)
             kl_divs[ang_idx] = kl.cpu().numpy()
@@ -136,6 +148,8 @@ def main():
                         help='Number of samples for covariance fitting (must be > d_model)')
     parser.add_argument('--delta_path', type=str, default=None,
                         help='Path to delta optimization results .pkl. Compares real vs real+delta instead of real vs random.')
+    parser.add_argument('--measure_layer', type=int, default=None,
+                        help='Layer at which to measure L2 distance (default: final layer)')
     parser.add_argument('--results_dir', type=str, default=None)
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
@@ -157,16 +171,23 @@ def main():
     angles_deg = np.linspace(0, 180, args.n_angles + 1)[1:]  # skip 0
     angles_rad = np.deg2rad(angles_deg)
 
+    measure_str = f", measure_layer={args.measure_layer}" if args.measure_layer is not None else ""
     print(f"Config: model={args.model}, layer={args.layer}, n_act={args.n_act}, "
           f"n_dirs={args.n_dirs}, n_angles={len(angles_deg)}, range=[{angles_deg[0]:.1f}, {angles_deg[-1]:.1f}] deg, "
-          f"comparison={comparison_tag}" + (f", n_fit={args.n_fit}" if args.cov_matched else "")
+          f"comparison={comparison_tag}" + measure_str
+          + (f", n_fit={args.n_fit}" if args.cov_matched else "")
           + (f", delta={args.delta_path}" if args.delta_path else ""))
 
     # Load model
     print(f"Loading model: {args.model}")
     model, tokenizer, device = load_model(args.model)
     d_model = model._plateau_info['d_model']
-    print(f"Device: {device}, d_model: {d_model}")
+    n_layers = len(_get_blocks(model))
+    # Resolve negative measure_layer (e.g. -2 → 2nd-to-last)
+    if args.measure_layer is not None and args.measure_layer < 0:
+        args.measure_layer = n_layers + args.measure_layer
+    print(f"Device: {device}, d_model: {d_model}, n_layers: {n_layers}"
+          + (f", measure_layer: {args.measure_layer}" if args.measure_layer is not None else ""))
 
     # Extract activations
     n_load = max(args.n_act, args.n_fit) if args.cov_matched else args.n_act
@@ -227,7 +248,8 @@ def main():
     for i in range(args.n_act):
         real_l2[i], real_kl[i] = run_spherical_sweep(
             model, contexts[i], activations[i], real_v_perps[i],
-            angles_rad, args.layer, device, args.n_dirs
+            angles_rad, args.layer, device, args.n_dirs,
+            measure_layer=args.measure_layer
         )
         if (i + 1) % 10 == 0:
             elapsed = time.time() - t0
@@ -242,7 +264,8 @@ def main():
     for i in range(args.n_act):
         rand_l2[i], rand_kl[i] = run_spherical_sweep(
             model, contexts[i], comparison_activations[i], rand_v_perps[i],
-            angles_rad, args.layer, device, args.n_dirs
+            angles_rad, args.layer, device, args.n_dirs,
+            measure_layer=args.measure_layer
         )
         if (i + 1) % 10 == 0:
             elapsed = time.time() - t0
@@ -309,7 +332,8 @@ def main():
             ax2.set_xticklabels([f'{c:.0f}' for c in tick_chords])
             ax2.set_xlabel('Chord distance')
 
-        fig.suptitle(f'{args.model}, layer {args.layer} (spherical, {comparison_tag}, {plot_type})', fontsize=14, y=1.02)
+        measure_label = f", L2@layer {args.measure_layer}" if args.measure_layer is not None else ""
+        fig.suptitle(f'{args.model}, layer {args.layer} (spherical, {comparison_tag}, {plot_type}{measure_label})', fontsize=14, y=1.02)
         plt.tight_layout()
         path = os.path.join(args.results_dir, f'sweep_{plot_type}.png')
         plt.savefig(path, dpi=150, bbox_inches='tight')

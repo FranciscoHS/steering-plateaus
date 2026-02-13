@@ -12,7 +12,16 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, GPT2LMHeadModel, G
 # Short names → HuggingFace model IDs
 MODEL_ALIASES = {
     'qwen3-0.6b': 'Qwen/Qwen3-0.6B',
+    'gemma-1-2b': 'google/gemma-2b',
+    'gemma-2-2b': 'google/gemma-2-2b',
+    'gemma-3-270m': 'google/gemma-3-270m',
+    'gemma-3-1b': 'google/gemma-3-1b-pt',
+    'gemma-3-4b': 'google/gemma-3-4b-pt',
+    'gemma-3-12b': 'google/gemma-3-12b-pt',
 }
+
+# Multimodal Gemma 3 models (4B+) need Gemma3ForCausalLM to extract the text decoder
+GEMMA3_MULTIMODAL = {'google/gemma-3-4b-pt', 'google/gemma-3-12b-pt', 'google/gemma-3-27b-pt'}
 
 
 def _get_blocks(model):
@@ -39,31 +48,41 @@ def _get_lm_head(model):
 
 
 def _is_rope_model(model):
-    """True for models that need explicit position_embeddings (Llama/Qwen)."""
-    return hasattr(model, '_plateau_info') and model._plateau_info['model_type'] == 'llama'
+    """True for models that need explicit position_embeddings (Llama/Qwen/Gemma)."""
+    return hasattr(model, '_plateau_info') and model._plateau_info['model_type'] in ('llama', 'gemma3')
 
 
 def _get_position_embeddings(model, hidden_states):
-    """Compute (cos, sin) position embeddings for RoPE models.
+    """Compute position embeddings for RoPE models.
 
     Args:
-        model: Llama/Qwen model
+        model: Llama/Qwen/Gemma model
         hidden_states: [batch, seq_len, d_model] - used to infer seq_len and device
 
     Returns:
-        position_embeddings: (cos, sin) tuple, each [batch, seq_len, head_dim]
+        For Gemma 3: ((cos_global, sin_global), (cos_local, sin_local))
+        For others: (cos, sin) tuple
     """
     position_ids = torch.arange(hidden_states.shape[1], device=hidden_states.device).unsqueeze(0)
+    if model._plateau_info['model_type'] == 'gemma3':
+        global_emb = model.model.rotary_emb(hidden_states, position_ids)
+        local_emb = model.model.rotary_emb_local(hidden_states, position_ids)
+        return (global_emb, local_emb)
     return model.model.rotary_emb(hidden_states, position_ids)
 
 
-def _run_block(block, hidden, rope, pos_emb=None):
-    """Run a single transformer block, handling different return conventions.
+def _run_block(block, hidden, model, pos_emb=None):
+    """Run a single transformer block, handling different architectures.
 
     GPT-2 blocks return a tuple (hidden_states, ...).
-    Llama/Qwen blocks return a plain tensor.
+    Llama/Qwen/Gemma blocks return a plain tensor.
     """
-    if rope:
+    model_type = model._plateau_info['model_type']
+    if model_type == 'gemma3':
+        global_emb, local_emb = pos_emb
+        result = block(hidden, position_embeddings_global=global_emb,
+                       position_embeddings_local=local_emb)
+    elif model_type == 'llama':
         result = block(hidden, position_embeddings=pos_emb)
     else:
         result = block(hidden)
@@ -99,10 +118,21 @@ def load_model(model_name='gpt2', device=None):
         tokenizer = GPT2Tokenizer.from_pretrained(hf_name)
         model_type = 'gpt2'
         d_model = model.config.n_embd
+    elif hf_name in GEMMA3_MULTIMODAL:
+        # Multimodal Gemma 3 (4B+): use Gemma3ForCausalLM to extract text decoder
+        from transformers import Gemma3ForCausalLM
+        model = Gemma3ForCausalLM.from_pretrained(hf_name, torch_dtype=torch.bfloat16).to(device)
+        tokenizer = AutoTokenizer.from_pretrained(hf_name)
+        model_type = 'gemma3'
+        d_model = model.config.hidden_size
     else:
         model = AutoModelForCausalLM.from_pretrained(hf_name, torch_dtype=torch.float32).to(device)
         tokenizer = AutoTokenizer.from_pretrained(hf_name)
-        model_type = 'llama'  # Llama-architecture (Qwen3, Llama, etc.)
+        config_type = getattr(model.config, 'model_type', '')
+        if config_type.startswith('gemma3'):
+            model_type = 'gemma3'
+        else:
+            model_type = 'llama'  # Llama-architecture (Qwen3, Llama, Gemma 1/2, etc.)
         d_model = model.config.hidden_size
 
     if tokenizer.pad_token is None:
@@ -217,12 +247,43 @@ def forward_from_layer(model, context, point, start_layer):
         pos_emb = _get_position_embeddings(model, hidden)
 
     for block in blocks[start_layer + 1:]:
-        hidden = _run_block(block, hidden, rope, pos_emb if rope else None)
+        hidden = _run_block(block, hidden, model, pos_emb if rope else None)
 
     hidden = _get_final_norm(model)(hidden)
     logits = _get_lm_head(model)(hidden[:, -1, :])
 
     return logits
+
+
+def forward_from_layer_to_layer(model, context, point, start_layer, end_layer):
+    """
+    Forward from start_layer to end_layer (inclusive). Returns last-token residual stream.
+
+    Like forward_from_layer_to_final but stops at a specific intermediate layer
+    instead of running through all remaining blocks.
+
+    Args:
+        model: GPT-2 or Llama-arch model
+        context: [1, seq_len-1, hidden_dim] - Prefix residual stream at start_layer
+        point: [n, 1, hidden_dim] - Last-token activation (may carry gradients)
+        start_layer: Layer index (0-indexed). Runs blocks starting from start_layer+1.
+        end_layer: Layer index (0-indexed, inclusive). Runs blocks through end_layer.
+
+    Returns:
+        final_act: [n, hidden_dim] - Last-token residual stream after end_layer block
+    """
+    context_batch = context.expand(point.shape[0], -1, -1)
+    hidden = torch.cat([context_batch, point], dim=1)
+
+    blocks = _get_blocks(model)
+    rope = _is_rope_model(model)
+    if rope:
+        pos_emb = _get_position_embeddings(model, hidden)
+
+    for block in blocks[start_layer + 1:end_layer + 1]:
+        hidden = _run_block(block, hidden, model, pos_emb if rope else None)
+
+    return hidden[:, -1, :]
 
 
 def forward_from_layer_to_final(model, context, point, start_layer):
@@ -250,7 +311,7 @@ def forward_from_layer_to_final(model, context, point, start_layer):
         pos_emb = _get_position_embeddings(model, hidden)
 
     for block in blocks[start_layer + 1:]:
-        hidden = _run_block(block, hidden, rope, pos_emb if rope else None)
+        hidden = _run_block(block, hidden, model, pos_emb if rope else None)
 
     return hidden[:, -1, :]
 
@@ -279,7 +340,7 @@ def forward_from_layer_allpos(model, hidden_states, start_layer):
         pos_emb = _get_position_embeddings(model, hidden)
 
     for block in blocks[start_layer + 1:]:
-        hidden = _run_block(block, hidden, rope, pos_emb if rope else None)
+        hidden = _run_block(block, hidden, model, pos_emb if rope else None)
 
     hidden = _get_final_norm(model)(hidden)
     logits = _get_lm_head(model)(hidden[:, -1, :])
