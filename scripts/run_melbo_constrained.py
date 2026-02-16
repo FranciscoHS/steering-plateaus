@@ -77,10 +77,9 @@ def forward_to_hidden_and_logits(model, hidden_states, start_layer):
     hidden = hidden_states
     blocks = _get_blocks(model)
     rope = _is_rope_model(model)
-    if rope:
-        pos_emb = _get_position_embeddings(model, hidden)
+    pos_emb = _get_position_embeddings(model, hidden) if rope else None
     for block in blocks[start_layer + 1:]:
-        hidden = _run_block(block, hidden, rope, pos_emb if rope else None)
+        hidden = _run_block(block, hidden, model, pos_emb)
     final_hidden = hidden[:, -1, :]
     normed = _get_final_norm(model)(final_hidden)
     logits = _get_lm_head(model)(normed)
