@@ -123,15 +123,31 @@ def build_perturbed_hidden(contexts, activations, direction, angle_rad):
     return torch.cat([contexts, a_pert.unsqueeze(1)], dim=1)
 
 
+def trimmed_mean(values, trim_frac=0.1):
+    """Compute trimmed mean, dropping the top trim_frac fraction of values.
+
+    Differentiable: uses torch.sort + slicing (both support autograd).
+    """
+    n = values.shape[0]
+    k = max(1, int(n * (1 - trim_frac)))  # keep this many
+    sorted_vals, _ = torch.sort(values)
+    return sorted_vals[:k].mean()
+
+
 def optimize_direction(model, contexts, activations, ref_log_probs,
                        V, angle_rad, layer, device,
                        n_steps=300, lr=0.01, n_restarts=5,
-                       prev_alphas=None):
-    """Find direction in span(V) maximizing mean KL divergence."""
+                       prev_alphas=None, robust=False, trim_frac=0.1):
+    """Find direction in span(V) maximizing KL divergence.
+
+    If robust=True, uses trimmed mean (dropping top trim_frac of samples)
+    instead of plain mean, to prevent outlier gaming.
+    """
     r = V.shape[1]
     best_kl = -float('inf')
     best_alpha = None
     best_history = None
+    agg_name = f"trimmed mean (drop top {trim_frac:.0%})" if robust else "mean"
 
     for restart in range(n_restarts):
         alpha = torch.randn(r, device=device)
@@ -158,7 +174,12 @@ def optimize_direction(model, contexts, activations, ref_log_probs,
             logits = forward_from_layer_allpos(model, hidden, layer)
             pert_log_probs = F.log_softmax(logits, dim=-1)
 
-            kl = (ref_log_probs.exp() * (ref_log_probs - pert_log_probs)).sum(dim=-1).mean()
+            kl_per_sample = (ref_log_probs.exp() * (ref_log_probs - pert_log_probs)).sum(dim=-1)
+
+            if robust:
+                kl = trimmed_mean(kl_per_sample, trim_frac=trim_frac)
+            else:
+                kl = kl_per_sample.mean()
 
             loss = -kl
             loss.backward()
@@ -174,7 +195,7 @@ def optimize_direction(model, contexts, activations, ref_log_probs,
 
             if step % 50 == 0 or step == n_steps - 1:
                 print(f"    restart {restart+1}/{n_restarts}, step {step}: "
-                      f"KL = {kl_val:.6f}")
+                      f"KL ({agg_name}) = {kl_val:.6f}")
 
         final_kl = history[-1]
         if final_kl > best_kl:
@@ -265,6 +286,10 @@ def main():
     parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--n_angles', type=int, default=60)
     parser.add_argument('--n_random_dirs', type=int, default=10)
+    parser.add_argument('--robust', action='store_true',
+                        help='Use trimmed mean instead of plain mean (prevents outlier gaming)')
+    parser.add_argument('--trim_frac', type=float, default=0.1,
+                        help='Fraction of top KL samples to drop when --robust is set')
     parser.add_argument('--results_dir', default=None)
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
@@ -370,11 +395,13 @@ def main():
 
     # ===== Phase 4: Optimization =====
     angle_rad = np.deg2rad(args.opt_angle)
+    agg_str = f"trimmed mean (drop top {args.trim_frac:.0%})" if args.robust else "mean"
     print(f"\n{'='*60}")
     print(f"OPTIMIZATION: top-{args.n_directions} directions in span(D)")
     print(f"D = act(dog_i) - act(animal_i) paired 1-to-1, constrained to span(D)")
     print(f"Angle: {args.opt_angle} deg, steps: {args.n_steps}, "
           f"restarts: {args.n_restarts}")
+    print(f"Aggregation: {agg_str}")
     print(f"{'='*60}")
 
     melbo_alphas = []
@@ -389,7 +416,8 @@ def main():
             model, contexts_dev, activations_dev, ref_log_probs,
             V_dev, angle_rad, args.layer, device,
             n_steps=args.n_steps, lr=args.lr, n_restarts=args.n_restarts,
-            prev_alphas=melbo_alphas if melbo_alphas else None
+            prev_alphas=melbo_alphas if melbo_alphas else None,
+            robust=args.robust, trim_frac=args.trim_frac
         )
         elapsed = time.time() - t0
 
