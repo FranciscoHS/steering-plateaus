@@ -2,15 +2,14 @@
 """
 Steer activations along boundary MELBO directions to see what they do.
 
-Applies spherical steering from original prompts along:
-  - MELBO_1 (the original language direction, for calibration)
-  - bnd_MELBO_1 and bnd_MELBO_2 (directions found at the boundary)
-Both positive and negative signs are tested (since bnd_MELBO dirs have no
-inherent sign convention like the English-Chinese mean does).
+Two modes:
+  --from_boundary: First rotate to the boundary (along walk_dir by median
+    boundary angle), then steer from there along bnd_MELBO directions.
+  (default): Steer directly from original activations.
 
 Usage:
-    python scripts/steer_boundary_dirs.py --model qwen3-0.6b --layer 14 --from_lang en
-    python scripts/steer_boundary_dirs.py --model qwen3-0.6b --layer 14 --from_lang zh
+    python scripts/boundary/steer_boundary_dirs.py --model qwen3-0.6b --layer 14 --from_lang en
+    python scripts/boundary/steer_boundary_dirs.py --model qwen3-0.6b --layer 14 --from_lang en --from_boundary
 """
 
 import argparse
@@ -25,9 +24,28 @@ from src.model import load_model, _get_blocks
 from data.bilingual_prompts import CHINESE_PROMPTS, ENGLISH_PROMPTS
 
 
+def _spherical_rotate(a, direction, cos_t, sin_t):
+    """Spherical rotation: rotate a toward direction by angle (given cos/sin).
+
+    a: [..., d], direction: [d] unit vector. Returns same shape as a.
+    Preserves norm of a.
+    """
+    R = a.norm(dim=-1, keepdim=True)
+    a_unit = a / (R + 1e-10)
+    proj = (a_unit * direction).sum(dim=-1, keepdim=True)
+    v_perp = direction.unsqueeze(0) - proj * a_unit
+    v_perp = v_perp / (v_perp.norm(dim=-1, keepdim=True) + 1e-10)
+    return R * (cos_t * a_unit + sin_t * v_perp)
+
+
 def generate_with_spherical_steering(model, tokenizer, prompt, steer_direction,
-                                     angle_deg, steer_layer, device, n_tokens=20):
+                                     angle_deg, steer_layer, device, n_tokens=20,
+                                     pre_direction=None, pre_angle_deg=0.0):
     """Generate tokens with spherical steering applied at every step.
+
+    If pre_direction and pre_angle_deg are given, first rotates toward
+    pre_direction by pre_angle_deg, then rotates from there toward
+    steer_direction by angle_deg. This implements "steer from boundary".
 
     No KV cache — full sequence reprocessed at each step for correctness.
     Steers all positions from last prompt token onward (rolling mode).
@@ -35,6 +53,12 @@ def generate_with_spherical_steering(model, tokenizer, prompt, steer_direction,
     cos_theta = np.cos(np.radians(angle_deg))
     sin_theta = np.sin(np.radians(angle_deg))
     direction = steer_direction.to(device)
+
+    do_pre = pre_direction is not None and pre_angle_deg > 0
+    if do_pre:
+        cos_pre = np.cos(np.radians(pre_angle_deg))
+        sin_pre = np.sin(np.radians(pre_angle_deg))
+        pre_dir = pre_direction.to(device)
 
     tokens = tokenizer(prompt, return_tensors='pt')
     input_ids = tokens['input_ids'].to(device)
@@ -54,12 +78,12 @@ def generate_with_spherical_steering(model, tokenizer, prompt, steer_direction,
             if steer_slice.shape[0] == 0:
                 return output
 
-            R = steer_slice.norm(dim=-1, keepdim=True)
-            a_unit = steer_slice / (R + 1e-10)
-            proj = (a_unit * direction).sum(dim=-1, keepdim=True)
-            v_perp = direction.unsqueeze(0) - proj * a_unit
-            v_perp = v_perp / (v_perp.norm(dim=-1, keepdim=True) + 1e-10)
-            steered = R * (cos_theta * a_unit + sin_theta * v_perp)
+            # Step 1: rotate to boundary (if requested)
+            if do_pre:
+                steer_slice = _spherical_rotate(steer_slice, pre_dir, cos_pre, sin_pre)
+
+            # Step 2: rotate along steer direction
+            steered = _spherical_rotate(steer_slice, direction, cos_theta, sin_theta)
             hidden[0, first_steer_pos:, :] = steered
 
             if isinstance(output, tuple):
@@ -95,6 +119,8 @@ def main():
     parser.add_argument('--layer', type=int, default=14)
     parser.add_argument('--from_lang', default='en', choices=['en', 'zh'],
                         help='Starting language for steering prompts')
+    parser.add_argument('--from_boundary', action='store_true',
+                        help='First rotate to boundary, then steer from there')
     parser.add_argument('--bnd_melbo_path', default=None)
     parser.add_argument('--orig_melbo_path', default=None)
     parser.add_argument('--angles', type=str, default='0,5,10,15,20,30',
@@ -142,6 +168,19 @@ def main():
     if (melbo_1 @ mean_dir) < 0:
         melbo_1 = -melbo_1
 
+    # Set up pre-rotation for boundary mode
+    pre_direction = None
+    pre_angle_deg = 0.0
+    if args.from_boundary:
+        median_boundary = float(np.median(bnd_saved['per_prompt_boundary_deg']))
+        # Walk direction: same as used in boundary finding
+        if args.from_lang == 'en':
+            pre_direction = -melbo_1  # toward Mandarin
+        else:
+            pre_direction = melbo_1   # toward English
+        pre_angle_deg = median_boundary
+        print(f"\nFrom-boundary mode: pre-rotating {pre_angle_deg:.1f} deg along walk direction")
+
     # Directions to test: MELBO_1 (calibration) and bnd_MELBO dirs (both signs)
     directions = [
         ('MELBO_1 (->En)', melbo_1),
@@ -152,11 +191,13 @@ def main():
         ('bnd_MELBO_2 (-)', -bnd_dirs[1]),
     ]
 
-    print(f"\nSteering from {len(prompts)} {src_label} prompts")
+    mode_label = f"from boundary ({pre_angle_deg:.0f} deg)" if args.from_boundary else "from original"
+    print(f"\nSteering {mode_label}, {len(prompts)} {src_label} prompts")
     print(f"Layer: {args.layer}, angles: {angles}, tokens: {args.n_tokens}")
     print(f"Directions: {[d[0] for d in directions]}")
 
     output_lines = []
+    output_lines.append(f"Mode: {mode_label}")
 
     for p_idx, prompt in enumerate(prompts):
         header = f"\n{'='*70}\nPrompt [{p_idx}]: {prompt}\n{'='*70}"
@@ -171,13 +212,15 @@ def main():
             for angle in angles:
                 text = generate_with_spherical_steering(
                     model, tokenizer, prompt, direction, angle,
-                    args.layer, device, n_tokens=args.n_tokens)
+                    args.layer, device, n_tokens=args.n_tokens,
+                    pre_direction=pre_direction, pre_angle_deg=pre_angle_deg)
                 line = f"  {angle:5.1f} deg: {text[:150]}"
                 print(line)
                 output_lines.append(line)
 
     # Save text output
-    output_path = os.path.join(args.results_dir, 'steering_outputs.txt')
+    suffix = '_from_boundary' if args.from_boundary else ''
+    output_path = os.path.join(args.results_dir, f'steering_outputs{suffix}.txt')
     with open(output_path, 'w') as f:
         f.write('\n'.join(output_lines))
     print(f"\nSaved outputs to {output_path}")
