@@ -9,6 +9,8 @@ I am Francisco, a researcher with a PhD in Quantum Info who is now working on me
 
 **Plans:** When creating plans (via plan mode or otherwise), always save a copy to the `Plans/` folder in the project root so Francisco can find them easily.
 
+**Attribution:** When discussing ideas, be careful to attribute them correctly. Don't present Francisco's or Stefan's ideas back as if they were Claude's own suggestions. It's fine to echo and evaluate ideas, but be explicit about where they came from.
+
 ## Project Overview
 
 This project investigates what distinguishes real activations (arising from actual inputs) from arbitrary points in activation space in language models. We want to characterize the geometric properties of real activations, random activations, and boundary points (identified during interpolation between real activations).
