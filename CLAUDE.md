@@ -83,7 +83,7 @@ Research project investigating activation plateaus. All code is exploratory/rese
 └── projects/steering-plateaus/
     ├── notebooks/            # Exploration, Colab migrations
     ├── src/                  # Cleaned-up reusable code
-    ├── scripts/              # Experiment runners
+    ├── scripts/              # Experiment runners (see scripts/INDEX.md for guide)
     ├── results/              # Outputs, plots, checkpoints
     ├── writeup/              # Paper drafts, figures
     ├── requirements.txt
