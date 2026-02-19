@@ -5,3 +5,5 @@ numpy
 matplotlib
 jupyter
 einops
+anthropic
+scipy

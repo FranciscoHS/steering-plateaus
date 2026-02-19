@@ -82,6 +82,14 @@ Quick reference: "I want to do X — which script do I run?"
 ## Refusal experiments
 - **Refusal plateau analysis:** `refusal/refusal_plateau_analysis_v2.py`
 
+## Auto-interpretability
+- **Compute projections (GPU):** `autointerp/01_compute_projections.py` — extract 50k activations, project onto 100 MELBO directions
+- **Explain + simulate (API):** `autointerp/02_explain_and_simulate.py` — Claude describes features and predicts activations
+- **Score results (local):** `autointerp/03_score.py` — Spearman correlation between predicted and actual
+- **Compute projections, long-context (GPU):** `autointerp/01_compute_projections_longctx.py` — all-position activations for 128-token passages
+- **Explain + simulate, long-context (API):** `autointerp/02_explain_and_simulate_longctx.py` — per-token predictions with highlighted passages
+- **Score results, long-context (local):** `autointerp/03_score_longctx.py` — per-token Spearman, comparison with short-context
+
 ## Plotting
 - Coherence plots: `plotting/plot_arabic_coherence.py`, `plotting/plot_russian_coherence.py`, `plotting/plot_spanish_coherence.py`
 - KL vs CJK: `plotting/plot_kl_vs_cjk.py`, `plotting/plot_kl_vs_cjk_v2.py`

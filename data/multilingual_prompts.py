@@ -2,7 +2,7 @@
 36 semantically matched prompt sets across 10 languages for multi-contrastive
 scaling experiments.
 
-Languages: EN, ZH, NL, ES, FR, DE, JA, IT, RU, PT
+Languages: ZH, NL, ES, FR, DE, JA, IT, RU, PT, AR
 Each set expresses the same meaning in all 10 languages.
 Short prompts (3-8 tokens target) to maximize token length consistency.
 
@@ -10,7 +10,7 @@ Used by scripts/run_scaling_test.py to verify 1/sqrt(k) error scaling
 of multi-contrastive feature estimators.
 """
 
-LANGUAGES = ['en', 'zh', 'nl', 'es', 'fr', 'de', 'ja', 'it', 'ru', 'pt']
+LANGUAGES = ['zh', 'nl', 'es', 'fr', 'de', 'ja', 'it', 'ru', 'pt', 'ar']
 
 PROMPT_SETS = [
     # === Nature & Weather ===
@@ -25,6 +25,7 @@ PROMPT_SETS = [
         'it': "Il sole è caldo",
         'ru': "Солнце тёплое",
         'pt': "O sol é quente",
+        'ar': "الشمس دافئة",
     },
     {
         'en': "The rain falls hard",
@@ -37,6 +38,7 @@ PROMPT_SETS = [
         'it': "La pioggia cade forte",
         'ru': "Дождь идёт сильно",
         'pt': "A chuva cai forte",
+        'ar': "المطر يسقط بشدة",
     },
     {
         'en': "The snow is white",
@@ -49,6 +51,7 @@ PROMPT_SETS = [
         'it': "La neve è bianca",
         'ru': "Снег белый",
         'pt': "A neve é branca",
+        'ar': "الثلج أبيض",
     },
     {
         'en': "The wind blows strong",
@@ -61,6 +64,7 @@ PROMPT_SETS = [
         'it': "Il vento soffia forte",
         'ru': "Ветер дует сильно",
         'pt': "O vento sopra forte",
+        'ar': "الرياح تهب بقوة",
     },
     {
         'en': "The sea is deep",
@@ -73,6 +77,7 @@ PROMPT_SETS = [
         'it': "Il mare è profondo",
         'ru': "Море глубокое",
         'pt': "O mar é profundo",
+        'ar': "البحر عميق",
     },
     {
         'en': "The tree is tall",
@@ -85,6 +90,7 @@ PROMPT_SETS = [
         'it': "L'albero è alto",
         'ru': "Дерево высокое",
         'pt': "A árvore é alta",
+        'ar': "الشجرة طويلة",
     },
     {
         'en': "The flower is red",
@@ -97,6 +103,7 @@ PROMPT_SETS = [
         'it': "Il fiore è rosso",
         'ru': "Цветок красный",
         'pt': "A flor é vermelha",
+        'ar': "الزهرة حمراء",
     },
     {
         'en': "The night is cold",
@@ -109,6 +116,7 @@ PROMPT_SETS = [
         'it': "La notte è fredda",
         'ru': "Ночь холодная",
         'pt': "A noite é fria",
+        'ar': "الليل بارد",
     },
 
     # === Animals ===
@@ -123,6 +131,7 @@ PROMPT_SETS = [
         'it': "Il cane è grande",
         'ru': "Собака большая",
         'pt': "O cão é grande",
+        'ar': "الكلب كبير",
     },
     {
         'en': "The cat sleeps well",
@@ -135,6 +144,7 @@ PROMPT_SETS = [
         'it': "Il gatto dorme bene",
         'ru': "Кошка спит хорошо",
         'pt': "O gato dorme bem",
+        'ar': "القطة تنام جيداً",
     },
     {
         'en': "The bird flies high",
@@ -147,6 +157,7 @@ PROMPT_SETS = [
         'it': "L'uccello vola alto",
         'ru': "Птица летает высоко",
         'pt': "O pássaro voa alto",
+        'ar': "الطائر يطير عالياً",
     },
     {
         'en': "The fish swims fast",
@@ -159,6 +170,7 @@ PROMPT_SETS = [
         'it': "Il pesce nuota veloce",
         'ru': "Рыба плавает быстро",
         'pt': "O peixe nada rápido",
+        'ar': "السمكة تسبح بسرعة",
     },
 
     # === Daily Life ===
@@ -173,6 +185,7 @@ PROMPT_SETS = [
         'it': "Il pane è fresco",
         'ru': "Хлеб свежий",
         'pt': "O pão está fresco",
+        'ar': "الخبز طازج",
     },
     {
         'en': "The water is cold",
@@ -185,6 +198,7 @@ PROMPT_SETS = [
         'it': "L'acqua è fredda",
         'ru': "Вода холодная",
         'pt': "A água está fria",
+        'ar': "الماء بارد",
     },
     {
         'en': "The food is good",
@@ -197,6 +211,7 @@ PROMPT_SETS = [
         'it': "Il cibo è buono",
         'ru': "Еда вкусная",
         'pt': "A comida é boa",
+        'ar': "الطعام لذيذ",
     },
     {
         'en': "The house is old",
@@ -209,6 +224,7 @@ PROMPT_SETS = [
         'it': "La casa è vecchia",
         'ru': "Дом старый",
         'pt': "A casa é velha",
+        'ar': "المنزل قديم",
     },
     {
         'en': "The book is long",
@@ -221,6 +237,7 @@ PROMPT_SETS = [
         'it': "Il libro è lungo",
         'ru': "Книга длинная",
         'pt': "O livro é longo",
+        'ar': "الكتاب طويل",
     },
     {
         'en': "The coffee is hot",
@@ -233,6 +250,7 @@ PROMPT_SETS = [
         'it': "Il caffè è caldo",
         'ru': "Кофе горячий",
         'pt': "O café está quente",
+        'ar': "القهوة ساخنة",
     },
 
     # === People & Actions ===
@@ -247,6 +265,7 @@ PROMPT_SETS = [
         'it': "Il bambino corre veloce",
         'ru': "Ребёнок бежит быстро",
         'pt': "A criança corre rápido",
+        'ar': "الطفل يركض بسرعة",
     },
     {
         'en': "The teacher speaks well",
@@ -259,6 +278,7 @@ PROMPT_SETS = [
         'it': "Il professore parla bene",
         'ru': "Учитель говорит хорошо",
         'pt': "O professor fala bem",
+        'ar': "المعلم يتحدث جيداً",
     },
     {
         'en': "The doctor helps people",
@@ -271,6 +291,7 @@ PROMPT_SETS = [
         'it': "Il medico aiuta le persone",
         'ru': "Врач помогает людям",
         'pt': "O médico ajuda pessoas",
+        'ar': "الطبيب يساعد الناس",
     },
     {
         'en': "My mother cooks well",
@@ -283,6 +304,7 @@ PROMPT_SETS = [
         'it': "Mia madre cucina bene",
         'ru': "Моя мама хорошо готовит",
         'pt': "Minha mãe cozinha bem",
+        'ar': "أمي تطبخ جيداً",
     },
 
     # === Places ===
@@ -297,6 +319,7 @@ PROMPT_SETS = [
         'it': "La città è grande",
         'ru': "Город большой",
         'pt': "A cidade é grande",
+        'ar': "المدينة كبيرة",
     },
     {
         'en': "The mountain is high",
@@ -309,6 +332,7 @@ PROMPT_SETS = [
         'it': "La montagna è alta",
         'ru': "Гора высокая",
         'pt': "A montanha é alta",
+        'ar': "الجبل مرتفع",
     },
     {
         'en': "The river flows slowly",
@@ -321,6 +345,7 @@ PROMPT_SETS = [
         'it': "Il fiume scorre lentamente",
         'ru': "Река течёт медленно",
         'pt': "O rio flui lentamente",
+        'ar': "النهر يجري ببطء",
     },
     {
         'en': "The school is near",
@@ -333,6 +358,7 @@ PROMPT_SETS = [
         'it': "La scuola è vicina",
         'ru': "Школа рядом",
         'pt': "A escola é perto",
+        'ar': "المدرسة قريبة",
     },
 
     # === Abstract / States ===
@@ -347,6 +373,7 @@ PROMPT_SETS = [
         'it': "La musica è forte",
         'ru': "Музыка громкая",
         'pt': "A música é alta",
+        'ar': "الموسيقى صاخبة",
     },
     {
         'en': "The problem is hard",
@@ -359,6 +386,7 @@ PROMPT_SETS = [
         'it': "Il problema è difficile",
         'ru': "Проблема сложная",
         'pt': "O problema é difícil",
+        'ar': "المشكلة صعبة",
     },
     {
         'en': "The story is long",
@@ -371,6 +399,7 @@ PROMPT_SETS = [
         'it': "La storia è lunga",
         'ru': "История длинная",
         'pt': "A história é longa",
+        'ar': "القصة طويلة",
     },
     {
         'en': "Sleep is very important",
@@ -383,6 +412,7 @@ PROMPT_SETS = [
         'it': "Il sonno è molto importante",
         'ru': "Сон очень важен",
         'pt': "O sono é muito importante",
+        'ar': "النوم مهم جداً",
     },
     {
         'en': "Time passes quickly here",
@@ -395,6 +425,7 @@ PROMPT_SETS = [
         'it': "Il tempo passa veloce qui",
         'ru': "Время здесь летит быстро",
         'pt': "O tempo passa rápido aqui",
+        'ar': "الوقت يمر بسرعة هنا",
     },
 
     # === More concrete ===
@@ -409,6 +440,7 @@ PROMPT_SETS = [
         'it': "La strada è lunga",
         'ru': "Дорога длинная",
         'pt': "A estrada é longa",
+        'ar': "الطريق طويل",
     },
     {
         'en': "The garden is beautiful",
@@ -421,6 +453,7 @@ PROMPT_SETS = [
         'it': "Il giardino è bello",
         'ru': "Сад красивый",
         'pt': "O jardim é bonito",
+        'ar': "الحديقة جميلة",
     },
     {
         'en': "The sky is blue",
@@ -433,6 +466,7 @@ PROMPT_SETS = [
         'it': "Il cielo è blu",
         'ru': "Небо голубое",
         'pt': "O céu é azul",
+        'ar': "السماء زرقاء",
     },
     {
         'en': "The door is open",
@@ -445,6 +479,7 @@ PROMPT_SETS = [
         'it': "La porta è aperta",
         'ru': "Дверь открыта",
         'pt': "A porta está aberta",
+        'ar': "الباب مفتوح",
     },
     {
         'en': "The light is bright",
@@ -457,6 +492,7 @@ PROMPT_SETS = [
         'it': "La luce è brillante",
         'ru': "Свет яркий",
         'pt': "A luz é brilhante",
+        'ar': "الضوء ساطع",
     },
 ]
 
