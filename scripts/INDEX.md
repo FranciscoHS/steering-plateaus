@@ -32,10 +32,13 @@ Quick reference: "I want to do X — which script do I run?"
 - **Constrained MELBO (within subspace):** `melbo/run_melbo_constrained.py`
 - **Unconstrained MELBO (full space):** `melbo/run_melbo_unconstrained.py`
 - **Diverse directions:** `melbo/run_melbo_diverse.py`
+- **Diverse directions (capped objective):** `melbo/run_melbo_diverse_capped.py`
 - **Animal prompts:** `melbo/run_melbo_animal.py`
 - **Dog breed prompts:** `melbo/run_melbo_dogs.py`
+- **Dog breed prompts (capped objective):** `melbo/run_melbo_dogs_capped.py`
 - **K=10 span experiment:** `melbo/run_melbo_k10_span.py`
 - **Rotation analysis:** `melbo/run_melbo_rotation.py`
+- **Diagnose MELBO animal discrepancy:** `melbo/diagnose_melbo_animal.py`
 - **Interpret MELBO dogs results:** `melbo/interpret_melbo_dogs.py`
 - **Print MELBO results:** `melbo/print_results.py`
 
@@ -52,6 +55,9 @@ Quick reference: "I want to do X — which script do I run?"
 - **Generate steered text:** `steering/steering_generate.py` (linear) or `steering/spherical_steering_generate.py` (spherical)
 - **Overshoot analysis:** `steering/steering_overshoot.py`
 - **Steer with diverse MELBO dirs:** `steering/run_steer_melbo_diverse.py`
+- **Steer with diverse capped MELBO dirs:** `steering/run_steer_melbo_diverse_capped.py`
+- **Steer with capped MELBO dog dirs:** `steering/steer_melbo_dogs_capped.py`
+- **Fine-grained steering sweep (capped dirs):** `steering/run_steer_fine_sweep.py`
 - **Topical steering:** `steering/gender_steering.py`, `steering/sentiment_steering.py`, `steering/refusal_steering.py`
 
 ## Direction decomposition & SVD
