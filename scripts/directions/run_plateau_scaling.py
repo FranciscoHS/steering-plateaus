@@ -14,23 +14,51 @@ sys.path.insert(0, '.')
 
 import torch
 import torch.nn.functional as F
-from scipy import optimize
 from src.model import (
     load_model, _get_blocks, _get_final_norm, _get_lm_head,
     _is_rope_model, _get_position_embeddings, _run_block,
 )
 from src.data import load_fineweb_fixed_length
 
-MODEL = 'qwen3-0.6b'
-LAYER = 14
-MEASURE_LAYER = 26
-N_ACT = 50
-SEQ_LEN = 5
-SEED = 42
-KL_THRESHOLD = 0.5
-MAX_COMBOS_PER_N = 45  # sample this many for n=3..7
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument('--model', default='qwen3-0.6b')
+parser.add_argument('--layer', type=int, default=14)
+parser.add_argument('--measure-layer', type=int, default=None)
+parser.add_argument('--n_act', type=int, default=50)
+parser.add_argument('--seq_len', type=int, default=5)
+parser.add_argument('--seed', type=int, default=42)
+parser.add_argument('--kl_threshold', type=float, default=0.5)
+parser.add_argument('--max_combos', type=int, default=45)
+parser.add_argument('--bfloat16', action='store_true')
+parser.add_argument('--cross-family', action='store_true',
+                    help='Only combine languages from different families')
+parser.add_argument('--5lang', dest='five_lang', action='store_true',
+                    help='Use 5-language (one per family) re-estimated features')
+args = parser.parse_args()
 
-results_dir = 'results/allpairs_contrastive/qwen3-0.6b'
+MODEL = args.model
+LAYER = args.layer
+N_ACT = args.n_act
+SEQ_LEN = args.seq_len
+SEED = args.seed
+KL_THRESHOLD = args.kl_threshold
+MAX_COMBOS_PER_N = args.max_combos
+
+# Language family mapping
+LANG_FAMILY = {
+    'zh': 'cjk', 'ja': 'cjk',
+    'nl': 'germanic', 'de': 'germanic',
+    'es': 'romance', 'fr': 'romance', 'it': 'romance', 'pt': 'romance',
+    'ru': 'slavic',
+    'ar': 'semitic',
+}
+
+
+def is_cross_family(combo, languages):
+    """Check that no two languages in the combo share a family."""
+    families = [LANG_FAMILY[languages[i]] for i in combo]
+    return len(families) == len(set(families))
 
 
 # --- Helper functions (from run_allpairs_contrastive.py) ---
@@ -96,8 +124,8 @@ def sweep_single_direction(model, contexts, activations, ref_measure, ref_log_pr
             pert_log_probs = F.log_softmax(pert_logits, dim=-1)
             l2 = (pert_measure - ref_measure).norm(dim=-1)
             kl = (ref_log_probs.exp() * (ref_log_probs - pert_log_probs)).sum(dim=-1)
-            l2_dists[:, ang_idx] = l2.cpu().numpy()
-            kl_divs[:, ang_idx] = kl.cpu().numpy()
+            l2_dists[:, ang_idx] = l2.float().cpu().numpy()
+            kl_divs[:, ang_idx] = kl.float().cpu().numpy()
     return kl_divs, l2_dists
 
 
@@ -120,16 +148,30 @@ def measure_plateau_size(mean_kl, angles_deg, threshold):
 # ============================================================
 
 # Load feature directions
-print("Loading feature directions...")
-with open(os.path.join(results_dir, 'directions.pkl'), 'rb') as f:
-    dir_data = pickle.load(f)
-features = dir_data['features']  # dict: lang → [d_model] tensor
-languages = dir_data['languages']
+results_dir = f'results/allpairs_contrastive/{MODEL}'
+if args.five_lang:
+    print("Loading 5-language features...")
+    with open(os.path.join(results_dir, '5lang_contrastive.pkl'), 'rb') as f:
+        lang5_data = pickle.load(f)
+    features = lang5_data['features_5']
+    languages = lang5_data['subset']
+else:
+    print("Loading feature directions...")
+    with open(os.path.join(results_dir, 'directions.pkl'), 'rb') as f:
+        dir_data = pickle.load(f)
+    features = dir_data['features']
+    languages = dir_data['languages']
 print(f"  {len(languages)} languages: {languages}")
 
 # Load model and FineWeb activations
 print("\nLoading model...")
-model, tokenizer, device = load_model(MODEL)
+load_dtype = torch.bfloat16 if args.bfloat16 else None
+model, tokenizer, device = load_model(MODEL, dtype=load_dtype)
+if args.bfloat16:
+    print("  Loaded in bfloat16")
+n_layers = len(_get_blocks(model))
+MEASURE_LAYER = args.measure_layer if args.measure_layer is not None else n_layers - 2
+print(f"  {n_layers} layers, measure_layer={MEASURE_LAYER}")
 
 print("Loading FineWeb activations...")
 token_ids_list = load_fineweb_fixed_length(N_ACT, tokenizer, seq_len=SEQ_LEN, seed=SEED)
@@ -155,9 +197,17 @@ k = len(languages)
 all_results = {}  # n → list of {combo, kl, l2, plateau_size}
 rng = random.Random(0)
 
-for n in range(1, k + 1):
+max_n = k
+if args.cross_family:
+    n_families = len(set(LANG_FAMILY[l] for l in languages))
+    max_n = n_families  # can't go beyond number of distinct families
+    print(f"  Cross-family mode: {n_families} families, max n={max_n}")
+
+for n in range(1, max_n + 1):
     # Generate combinations
     all_combos = list(itertools.combinations(range(k), n))
+    if args.cross_family:
+        all_combos = [c for c in all_combos if is_cross_family(c, languages)]
     if len(all_combos) <= MAX_COMBOS_PER_N:
         combos = all_combos
     else:
@@ -219,7 +269,7 @@ print("\n=== Summary: Plateau size vs n ===")
 n_values = []
 mean_plateaus = []
 std_plateaus = []
-for n in range(1, k + 1):
+for n in range(1, max_n + 1):
     sizes = [r['plateau_size'] for r in all_results[n]]
     m, s = np.mean(sizes), np.std(sizes)
     n_values.append(n)
@@ -231,15 +281,6 @@ n_values = np.array(n_values)
 mean_plateaus = np.array(mean_plateaus)
 std_plateaus = np.array(std_plateaus)
 
-# Fit power law: plateau_size = a * n^alpha
-def power_law(n, a, alpha):
-    return a * n ** alpha
-
-popt, pcov = optimize.curve_fit(power_law, n_values, mean_plateaus, p0=[mean_plateaus[0], 0.5])
-a_fit, alpha_fit = popt
-print(f"\nPower law fit: plateau = {a_fit:.2f} * n^{alpha_fit:.3f}")
-print(f"  (prediction: α = 0.5)")
-
 # === Save final results ===
 print("\n=== Saving ===")
 save_data = {
@@ -249,14 +290,16 @@ save_data = {
     'n_values': n_values,
     'mean_plateaus': mean_plateaus,
     'std_plateaus': std_plateaus,
-    'power_law_fit': {'a': a_fit, 'alpha': alpha_fit},
     'layer': LAYER,
     'measure_layer': MEASURE_LAYER,
     'languages': languages,
+    'cross_family': args.cross_family,
+    'five_lang': args.five_lang,
 }
-with open(os.path.join(results_dir, 'plateau_scaling.pkl'), 'wb') as f:
+suffix = '_5lang' if args.five_lang else ('_crossfamily' if args.cross_family else '')
+with open(os.path.join(results_dir, f'plateau_scaling{suffix}.pkl'), 'wb') as f:
     pickle.dump(save_data, f)
-print(f"  Saved: {results_dir}/plateau_scaling.pkl")
+print(f"  Saved: {results_dir}/plateau_scaling{suffix}.pkl")
 
 # === Plot ===
 print("\n=== Generating plots ===")
@@ -269,40 +312,44 @@ mask = angles_deg <= 60
 # --- Plot 1: KL curves by n ---
 fig, ax = plt.subplots(figsize=(8, 5))
 cmap = plt.cm.viridis
-for n in range(1, k + 1):
+for n in range(1, max_n + 1):
     # Average KL across all combos for this n
     all_kl = np.stack([r['kl'] for r in all_results[n]])  # [n_combos, 50, 60]
     mean_kl = all_kl.mean(axis=(0, 1))  # [60]
-    color = cmap((n - 1) / (k - 1))
+    color = cmap((n - 1) / max(max_n - 1, 1))
     ax.plot(angles_deg[mask], mean_kl[mask], color=color, linewidth=1.5, label=f'n={n}')
 
-# Random baseline (load from previous experiment)
-with open(os.path.join(results_dir, 'sweep_results.pkl'), 'rb') as f:
-    prev_data = pickle.load(f)
-rand_kl = prev_data['sweep_results']['random']['kl']
-rand_kl_avg = rand_kl[:, mask, :].mean(axis=2)
-ax.plot(angles_deg[mask], rand_kl_avg.mean(axis=0), '--', color='gray',
-        label='random', linewidth=1.5)
-ax.fill_between(angles_deg[mask],
-                rand_kl_avg.mean(axis=0) - rand_kl_avg.std(axis=0),
-                rand_kl_avg.mean(axis=0) + rand_kl_avg.std(axis=0),
-                color='gray', alpha=0.15)
+# Random baseline (load from previous experiment if available)
+try:
+    rand_file = 'sweep_results.pkl'
+    with open(os.path.join(results_dir, rand_file), 'rb') as f:
+        prev_data = pickle.load(f)
+    rand_kl = prev_data['sweep_results']['random']['kl']
+    # Only plot if angles match
+    prev_angles = prev_data.get('angles_deg', None)
+    if prev_angles is not None and len(prev_angles) == rand_kl.shape[1]:
+        prev_mask = prev_angles <= 60
+        rand_kl_avg = rand_kl[:, prev_mask, :].mean(axis=2)
+        ax.plot(prev_angles[prev_mask], rand_kl_avg.mean(axis=0), '--', color='gray',
+                label='random', linewidth=1.5)
+except Exception:
+    pass  # skip random baseline if file not found
 
 ax.axhline(y=KL_THRESHOLD, color='red', linestyle=':', alpha=0.5, label=f'threshold={KL_THRESHOLD}')
 ax.set_xlabel('Perturbation angle (°)')
 ax.set_ylabel('Mean KL divergence')
-ax.set_title(f'KL curves by number of summed features\nQwen3-0.6B, layer {LAYER}')
+ax.set_title(f'KL curves by number of summed features\n{MODEL}, layer {LAYER}')
 ax.legend(fontsize=7, ncol=2)
 ax.grid(True, alpha=0.3)
 fig.tight_layout()
-fig.savefig(os.path.join(results_dir, 'scaling_kl_curves.png'), dpi=150, bbox_inches='tight')
-print(f"  Saved: {results_dir}/scaling_kl_curves.png")
+fig.savefig(os.path.join(results_dir, f'scaling_kl_curves{suffix}.png'), dpi=150, bbox_inches='tight')
+print(f"  Saved: {results_dir}/scaling_kl_curves{suffix}.png")
 
 # --- Plot 2: Plateau size vs n (two panels: linear and log-log) ---
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
 
 # Left: linear scale
-for n in range(1, k + 1):
+for n in range(1, max_n + 1):
     sizes = [r['plateau_size'] for r in all_results[n]]
     jitter = np.random.RandomState(42).uniform(-0.15, 0.15, len(sizes))
     ax1.scatter(np.full(len(sizes), n) + jitter, sizes,
@@ -312,17 +359,14 @@ ax1.errorbar(n_values, mean_plateaus, yerr=std_plateaus,
              fmt='o-', color='navy', markersize=6, linewidth=2, capsize=3,
              zorder=2, label='mean ± std')
 
-# Fit curve
-n_fine = np.linspace(1, 10, 100)
-ax1.plot(n_fine, power_law(n_fine, a_fit, alpha_fit), '--', color='red', linewidth=1.5,
-         label=f'fit: {a_fit:.1f} × n^{{{alpha_fit:.3f}}}')
+n_fine = np.linspace(1, max_n, 100)
 ax1.plot(n_fine, mean_plateaus[0] * np.sqrt(n_fine), ':', color='green', linewidth=1.5,
          label=f'√n prediction: {mean_plateaus[0]:.1f} × √n')
 
 ax1.set_xlabel('Number of features summed (n)')
 ax1.set_ylabel(f'Plateau size (° at KL > {KL_THRESHOLD})')
 ax1.set_title('Plateau size vs n')
-ax1.set_xticks(range(1, k + 1))
+ax1.set_xticks(range(1, max_n + 1))
 ax1.legend(fontsize=8)
 ax1.grid(True, alpha=0.3)
 
@@ -330,8 +374,6 @@ ax1.grid(True, alpha=0.3)
 ax2.errorbar(n_values, mean_plateaus, yerr=std_plateaus,
              fmt='o-', color='navy', markersize=6, linewidth=2, capsize=3,
              label='mean ± std')
-ax2.plot(n_fine, power_law(n_fine, a_fit, alpha_fit), '--', color='red', linewidth=1.5,
-         label=f'slope = {alpha_fit:.3f}')
 ax2.plot(n_fine, mean_plateaus[0] * np.sqrt(n_fine), ':', color='green', linewidth=1.5,
          label='slope = 0.5')
 
@@ -343,10 +385,11 @@ ax2.set_title('Log-log: plateau size vs n')
 ax2.legend(fontsize=8)
 ax2.grid(True, alpha=0.3)
 
-fig.suptitle(f'Plateau scaling with composite feature directions\n'
-             f'Qwen3-0.6B, layer {LAYER}, threshold KL > {KL_THRESHOLD}', fontsize=12)
+label_5lang = ' (5-lang features)' if args.five_lang else ''
+fig.suptitle(f'Plateau scaling{label_5lang}\n'
+             f'{MODEL}, layer {LAYER}, threshold KL > {KL_THRESHOLD}', fontsize=12)
 fig.tight_layout()
-fig.savefig(os.path.join(results_dir, 'plateau_scaling.png'), dpi=150, bbox_inches='tight')
-print(f"  Saved: {results_dir}/plateau_scaling.png")
+fig.savefig(os.path.join(results_dir, f'plateau_scaling{suffix}.png'), dpi=150, bbox_inches='tight')
+print(f"  Saved: {results_dir}/plateau_scaling{suffix}.png")
 
 print("\nDone!")

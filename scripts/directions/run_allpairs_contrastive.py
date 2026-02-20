@@ -24,15 +24,25 @@ from src.model import (
 from src.data import load_fineweb_fixed_length
 from data.multilingual_prompts import PROMPT_SETS, LANGUAGES
 
-MODEL = 'qwen3-0.6b'
-LAYER = 14
-MEASURE_LAYER = 26  # 2nd-to-last of 28 layers (0-27)
-N_PROMPTS = 36
-N_ACT = 50  # FineWeb sequences for sweeps
-SEQ_LEN = 5
-SEED = 42
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument('--model', default='qwen3-0.6b')
+parser.add_argument('--layer', type=int, default=14)
+parser.add_argument('--measure-layer', type=int, default=None,
+                    help='Layer for L2 measurement (default: n_layers - 2)')
+parser.add_argument('--n_act', type=int, default=50)
+parser.add_argument('--seq_len', type=int, default=5)
+parser.add_argument('--seed', type=int, default=42)
+parser.add_argument('--bfloat16', action='store_true',
+                    help='Load model in bfloat16 (needed for larger models on 24GB)')
+args = parser.parse_args()
 
-results_dir = 'results/allpairs_contrastive/qwen3-0.6b'
+MODEL = args.model
+LAYER = args.layer
+N_PROMPTS = 36
+N_ACT = args.n_act
+SEQ_LEN = args.seq_len
+SEED = args.seed
 
 
 # --- Helper functions (reused from rerun_plateau_sweeps.py) ---
@@ -109,8 +119,8 @@ def sweep_single_direction(model, contexts, activations, ref_measure, ref_log_pr
             pert_log_probs = F.log_softmax(pert_logits, dim=-1)
             l2 = (pert_measure - ref_measure).norm(dim=-1)
             kl = (ref_log_probs.exp() * (ref_log_probs - pert_log_probs)).sum(dim=-1)
-            l2_dists[:, ang_idx] = l2.cpu().numpy()
-            kl_divs[:, ang_idx] = kl.cpu().numpy()
+            l2_dists[:, ang_idx] = l2.float().cpu().numpy()
+            kl_divs[:, ang_idx] = kl.float().cpu().numpy()
     return kl_divs, l2_dists
 
 
@@ -124,9 +134,10 @@ def sweep_random_directions(model, contexts, activations, ref_measure, ref_log_p
     a_norms = activations.norm(dim=-1, keepdim=True)
     a_unit = activations / a_norms
 
-    v_perps = torch.zeros(N, n_dirs, d, device=device)
+    act_dtype = activations.dtype
+    v_perps = torch.zeros(N, n_dirs, d, device=device, dtype=act_dtype)
     for i in range(N):
-        v = torch.randn(n_dirs, d, device=device)
+        v = torch.randn(n_dirs, d, device=device, dtype=act_dtype)
         v = v - (v @ a_unit[i]).unsqueeze(1) * a_unit[i].unsqueeze(0)
         v_perps[i] = F.normalize(v, dim=-1)
 
@@ -143,8 +154,8 @@ def sweep_random_directions(model, contexts, activations, ref_measure, ref_log_p
                 pert_log_probs = F.log_softmax(pert_logits, dim=-1)
                 l2 = (pert_measure - ref_measure).norm(dim=-1)
                 kl = (ref_log_probs.exp() * (ref_log_probs - pert_log_probs)).sum(dim=-1)
-                l2_dists[:, ang_idx, dir_idx] = l2.cpu().numpy()
-                kl_divs[:, ang_idx, dir_idx] = kl.cpu().numpy()
+                l2_dists[:, ang_idx, dir_idx] = l2.float().cpu().numpy()
+                kl_divs[:, ang_idx, dir_idx] = kl.float().cpu().numpy()
     return kl_divs, l2_dists
 
 
@@ -152,13 +163,20 @@ def sweep_random_directions(model, contexts, activations, ref_measure, ref_log_p
 # MAIN
 # ============================================================
 
-print(f"Model: {MODEL}, Layer: {LAYER}, Measure layer: {MEASURE_LAYER}")
+print(f"Model: {MODEL}, Layer: {LAYER}")
 print(f"Languages: {LANGUAGES}")
 print(f"Number of prompt sets: {N_PROMPTS}")
 print(f"Number of pairwise contrasts: {len(LANGUAGES) * (len(LANGUAGES) - 1) // 2}")
 
 print("\nLoading model...")
-model, tokenizer, device = load_model(MODEL)
+load_dtype = torch.bfloat16 if args.bfloat16 else None
+model, tokenizer, device = load_model(MODEL, dtype=load_dtype)
+if args.bfloat16:
+    print("  Loaded in bfloat16")
+n_layers = len(_get_blocks(model))
+MEASURE_LAYER = args.measure_layer if args.measure_layer is not None else n_layers - 2
+results_dir = f'results/allpairs_contrastive/{MODEL}'
+print(f"  {n_layers} layers, measure_layer={MEASURE_LAYER}")
 
 # === Phase 1: Extract activations for all languages ===
 print("\n=== Phase 1: Extracting activations ===")
@@ -355,7 +373,7 @@ ax2.set_title(f'L2 distance (layer {MEASURE_LAYER})')
 ax2.legend(fontsize=7, ncol=2)
 ax2.grid(True, alpha=0.3)
 fig.suptitle('Positive feature directions (+f̂_i: toward language)\n'
-             f'Qwen3-0.6B, layer {LAYER}', fontsize=12)
+             f'{MODEL}, layer {LAYER}', fontsize=12)
 fig.tight_layout()
 fig.savefig(os.path.join(results_dir, 'sweeps_positive.png'), dpi=150, bbox_inches='tight')
 print(f"  Saved: {results_dir}/sweeps_positive.png")
@@ -393,7 +411,7 @@ ax2.set_title(f'L2 distance (layer {MEASURE_LAYER})')
 ax2.legend(fontsize=7, ncol=2)
 ax2.grid(True, alpha=0.3)
 fig.suptitle('Negative feature directions (-f̂_i: away from language)\n'
-             f'Qwen3-0.6B, layer {LAYER}', fontsize=12)
+             f'{MODEL}, layer {LAYER}', fontsize=12)
 fig.tight_layout()
 fig.savefig(os.path.join(results_dir, 'sweeps_negative.png'), dpi=150, bbox_inches='tight')
 print(f"  Saved: {results_dir}/sweeps_negative.png")
@@ -409,7 +427,7 @@ for i in range(k):
     for j in range(k):
         ax.text(j, i, f'{cos_matrix[i,j]:.2f}', ha='center', va='center', fontsize=7)
 fig.colorbar(im, ax=ax, shrink=0.8)
-ax.set_title(f'Cosine similarity between recovered features\nQwen3-0.6B, layer {LAYER}')
+ax.set_title(f'Cosine similarity between recovered features\n{MODEL}, layer {LAYER}')
 fig.tight_layout()
 fig.savefig(os.path.join(results_dir, 'cosine_heatmap.png'), dpi=150, bbox_inches='tight')
 print(f"  Saved: {results_dir}/cosine_heatmap.png")

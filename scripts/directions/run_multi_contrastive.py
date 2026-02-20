@@ -107,8 +107,8 @@ def sweep_single_direction(model, contexts, activations, ref_final, ref_log_prob
             pert_log_probs = F.log_softmax(pert_logits, dim=-1)
             l2 = (pert_final - ref_final).norm(dim=-1)
             kl = (ref_log_probs.exp() * (ref_log_probs - pert_log_probs)).sum(dim=-1)
-            l2_dists[:, ang_idx] = l2.cpu().numpy()
-            kl_divs[:, ang_idx] = kl.cpu().numpy()
+            l2_dists[:, ang_idx] = l2.float().cpu().numpy()
+            kl_divs[:, ang_idx] = kl.float().cpu().numpy()
     return kl_divs, l2_dists
 
 
@@ -121,9 +121,10 @@ def sweep_random_directions(model, contexts, activations, ref_final, ref_log_pro
     l2_dists = np.zeros((N, n_angles, n_dirs))
     a_norms = activations.norm(dim=-1, keepdim=True)
     a_unit = activations / a_norms
-    v_perps = torch.zeros(N, n_dirs, d, device=device)
+    act_dtype = activations.dtype
+    v_perps = torch.zeros(N, n_dirs, d, device=device, dtype=act_dtype)
     for i in range(N):
-        v = torch.randn(n_dirs, d, device=device)
+        v = torch.randn(n_dirs, d, device=device, dtype=act_dtype)
         v = v - (v @ a_unit[i]).unsqueeze(1) * a_unit[i].unsqueeze(0)
         v_perps[i] = F.normalize(v, dim=-1)
     for ang_idx, theta in enumerate(angles_rad):
@@ -138,8 +139,8 @@ def sweep_random_directions(model, contexts, activations, ref_final, ref_log_pro
                 pert_log_probs = F.log_softmax(pert_logits, dim=-1)
                 l2 = (pert_final - ref_final).norm(dim=-1)
                 kl = (ref_log_probs.exp() * (ref_log_probs - pert_log_probs)).sum(dim=-1)
-                l2_dists[:, ang_idx, dir_idx] = l2.cpu().numpy()
-                kl_divs[:, ang_idx, dir_idx] = kl.cpu().numpy()
+                l2_dists[:, ang_idx, dir_idx] = l2.float().cpu().numpy()
+                kl_divs[:, ang_idx, dir_idx] = kl.float().cpu().numpy()
     return kl_divs, l2_dists
 
 
@@ -154,7 +155,7 @@ def optimize_direction(model, contexts, activations, ref_log_probs,
     best_history = None
 
     for restart in range(n_restarts):
-        alpha = torch.randn(r, device=device)
+        alpha = torch.randn(r, device=device, dtype=V.dtype)
         if prev_alphas:
             for pa in prev_alphas:
                 alpha = alpha - (alpha @ pa) * pa
@@ -216,6 +217,10 @@ def main():
     parser.add_argument('--n_restarts', type=int, default=5)
     parser.add_argument('--n_random_dirs', type=int, default=10)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--bfloat16', action='store_true',
+                        help='Load model in bfloat16 (needed for larger models on 24GB)')
+    parser.add_argument('--no-melbo', action='store_true',
+                        help='Skip MELBO optimization (just do directions + sweeps)')
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -226,7 +231,10 @@ def main():
 
     # ===== Phase A: Collect activation differences =====
     print(f"Loading model: {args.model}")
-    model, tokenizer, device = load_model(args.model)
+    load_dtype = torch.bfloat16 if args.bfloat16 else None
+    model, tokenizer, device = load_model(args.model, dtype=load_dtype)
+    if args.bfloat16:
+        print("  Loaded in bfloat16")
     d_model = model._plateau_info['d_model']
     print(f"Device: {device}, d_model: {d_model}")
 
@@ -272,18 +280,21 @@ def main():
 
     # ===== Phase C: MELBO on joint and individual spans =====
     print("\nComputing SVDs...")
-    D_joint = torch.cat([D_EM, D_ED, D_MD], dim=0)  # [150, d_model]
+    # SVD requires float32 (not supported for bfloat16 on CPU)
+    # Cast V matrices back to model dtype when moving to device for consistent forward passes
+    model_dtype = next(model.parameters()).dtype
+    D_joint = torch.cat([D_EM, D_ED, D_MD], dim=0).float()  # [150, d_model]
     U_j, S_j, Vh_j = torch.linalg.svd(D_joint, full_matrices=False)
-    V_joint = Vh_j.T.to(device)
+    V_joint = Vh_j.T.to(dtype=model_dtype, device=device)
     print(f"  Joint SVD: shape {D_joint.shape}, rank={V_joint.shape[1]}, "
           f"top SV={S_j[0]:.2f}, var_explained_top5={((S_j[:5]**2).sum() / (S_j**2).sum()):.3f}")
 
-    U_em, S_em, Vh_em = torch.linalg.svd(D_EM, full_matrices=False)
-    V_EM = Vh_em.T.to(device)
-    U_ed, S_ed, Vh_ed = torch.linalg.svd(D_ED, full_matrices=False)
-    V_ED = Vh_ed.T.to(device)
-    U_md, S_md, Vh_md = torch.linalg.svd(D_MD, full_matrices=False)
-    V_MD = Vh_md.T.to(device)
+    U_em, S_em, Vh_em = torch.linalg.svd(D_EM.float(), full_matrices=False)
+    V_EM = Vh_em.T.to(dtype=model_dtype, device=device)
+    U_ed, S_ed, Vh_ed = torch.linalg.svd(D_ED.float(), full_matrices=False)
+    V_ED = Vh_ed.T.to(dtype=model_dtype, device=device)
+    U_md, S_md, Vh_md = torch.linalg.svd(D_MD.float(), full_matrices=False)
+    V_MD = Vh_md.T.to(dtype=model_dtype, device=device)
     print(f"  V_EM rank={V_EM.shape[1]}, V_ED rank={V_ED.shape[1]}, V_MD rank={V_MD.shape[1]}")
 
     # Load FineWeb activations
@@ -304,42 +315,54 @@ def main():
 
     opt_angle_rad = np.radians(args.opt_angle)
 
-    # MELBO on joint span (3 directions)
-    print(f"\n{'='*60}")
-    print("MELBO on JOINT span (EN-ZH + EN-NL + ZH-NL)")
-    print(f"{'='*60}")
-    joint_alphas = []
-    joint_directions = []
-    joint_kls = []
-    for i in range(3):
-        print(f"\n  Direction {i+1}/3:")
-        alpha, direction, kl, history = optimize_direction(
-            model, contexts, activations, ref_log_probs,
-            V_joint, opt_angle_rad, args.layer, device,
-            n_steps=args.n_steps, lr=0.01, n_restarts=args.n_restarts,
-            prev_alphas=joint_alphas if joint_alphas else None)
-        joint_alphas.append(alpha)
-        joint_directions.append(direction.cpu())
-        joint_kls.append(kl)
-        print(f"  -> MELBO_joint_{i+1}: KL = {kl:.4f}")
+    if not args.no_melbo:
+        # MELBO on joint span (3 directions)
+        print(f"\n{'='*60}")
+        print("MELBO on JOINT span (EN-ZH + EN-NL + ZH-NL)")
+        print(f"{'='*60}")
+        joint_alphas = []
+        joint_directions = []
+        joint_kls = []
+        for i in range(3):
+            print(f"\n  Direction {i+1}/3:")
+            alpha, direction, kl, history = optimize_direction(
+                model, contexts, activations, ref_log_probs,
+                V_joint, opt_angle_rad, args.layer, device,
+                n_steps=args.n_steps, lr=0.01, n_restarts=args.n_restarts,
+                prev_alphas=joint_alphas if joint_alphas else None)
+            joint_alphas.append(alpha)
+            joint_directions.append(direction.cpu())
+            joint_kls.append(kl)
+            print(f"  -> MELBO_joint_{i+1}: KL = {kl:.4f}")
 
-    # MELBO on individual spans (1 direction each)
-    print(f"\n{'='*60}")
-    print("MELBO on individual spans")
-    print(f"{'='*60}")
-    individual_melbo = {}
-    for name, V_sub in [('EM', V_EM), ('ED', V_ED), ('MD', V_MD)]:
-        print(f"\n  MELBO on {name} span:")
-        _, direction, kl, _ = optimize_direction(
-            model, contexts, activations, ref_log_probs,
-            V_sub, opt_angle_rad, args.layer, device,
-            n_steps=args.n_steps, lr=0.01, n_restarts=args.n_restarts)
-        individual_melbo[name] = {'direction': direction.cpu(), 'kl': kl}
-        print(f"  -> MELBO_{name}: KL = {kl:.4f}")
+        # MELBO on individual spans (1 direction each)
+        print(f"\n{'='*60}")
+        print("MELBO on individual spans")
+        print(f"{'='*60}")
+        individual_melbo = {}
+        for name, V_sub in [('EM', V_EM), ('ED', V_ED), ('MD', V_MD)]:
+            print(f"\n  MELBO on {name} span:")
+            _, direction, kl, _ = optimize_direction(
+                model, contexts, activations, ref_log_probs,
+                V_sub, opt_angle_rad, args.layer, device,
+                n_steps=args.n_steps, lr=0.01, n_restarts=args.n_restarts)
+            individual_melbo[name] = {'direction': direction.cpu(), 'kl': kl}
+            print(f"  -> MELBO_{name}: KL = {kl:.4f}")
+    else:
+        joint_alphas = []
+        joint_directions = []
+        joint_kls = []
+        individual_melbo = {}
 
     # ===== Phase E: Perturbation sweeps =====
     angles_deg = np.linspace(3, 180, args.n_angles)
     angles_rad = np.radians(angles_deg)
+
+    # SVD leading directions (top right singular vectors)
+    svd_dir_joint = Vh_j[0].to(dtype=model_dtype, device='cpu')
+    svd_dir_EM = Vh_em[0].to(dtype=model_dtype, device='cpu')
+    svd_dir_ED = Vh_ed[0].to(dtype=model_dtype, device='cpu')
+    svd_dir_MD = Vh_md[0].to(dtype=model_dtype, device='cpu')
 
     all_directions = {
         'd_EM': d_EM,
@@ -348,13 +371,20 @@ def main():
         'f_E': f_E,
         'f_M': f_M,
         'f_D': f_D,
-        'MELBO_joint_1': joint_directions[0],
-        'MELBO_joint_2': joint_directions[1],
-        'MELBO_joint_3': joint_directions[2],
-        'MELBO_EM': individual_melbo['EM']['direction'],
-        'MELBO_ED': individual_melbo['ED']['direction'],
-        'MELBO_MD': individual_melbo['MD']['direction'],
+        'SVD_joint_1': svd_dir_joint,
+        'SVD_EM_1': svd_dir_EM,
+        'SVD_ED_1': svd_dir_ED,
+        'SVD_MD_1': svd_dir_MD,
     }
+    if not args.no_melbo:
+        all_directions.update({
+            'MELBO_joint_1': joint_directions[0],
+            'MELBO_joint_2': joint_directions[1],
+            'MELBO_joint_3': joint_directions[2],
+            'MELBO_EM': individual_melbo['EM']['direction'],
+            'MELBO_ED': individual_melbo['ED']['direction'],
+            'MELBO_MD': individual_melbo['MD']['direction'],
+        })
 
     print(f"\n{'='*60}")
     print(f"Perturbation sweeps ({len(all_directions)} directions + random)")
@@ -411,14 +441,15 @@ def main():
     save_data = {
         'args': vars(args),
         'directions': {name: d.cpu() for name, d in all_directions.items()},
-        'joint_alphas': [a.cpu() for a in joint_alphas],
-        'joint_kls': joint_kls,
-        'individual_melbo': individual_melbo,
         'cosine_matrix': cos_matrix,
         'cosine_names': dir_names,
         'D_EM': D_EM, 'D_ED': D_ED, 'D_MD': D_MD,
         'singular_values': {'joint': S_j, 'EM': S_em, 'ED': S_ed, 'MD': S_md},
     }
+    if not args.no_melbo:
+        save_data['joint_alphas'] = [a.cpu() for a in joint_alphas]
+        save_data['joint_kls'] = joint_kls
+        save_data['individual_melbo'] = individual_melbo
     with open(os.path.join(results_dir, 'optimization_results.pkl'), 'wb') as f:
         pickle.dump(save_data, f)
 

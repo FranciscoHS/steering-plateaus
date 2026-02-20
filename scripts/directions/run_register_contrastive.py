@@ -506,17 +506,18 @@ def main():
         # All directions (for convenience)
         'all_directions': {name: d.cpu() for name, d in all_directions.items()},
     }
-    with open(os.path.join(results_dir, 'direction_results.pkl'), 'wb') as f:
+    layer_suffix = f'_L{args.layer}' if args.layer != 14 else ''
+    with open(os.path.join(results_dir, f'direction_results{layer_suffix}.pkl'), 'wb') as f:
         pickle.dump(save_data, f)
 
     sweep_save = {
         'angles_deg': angles_deg,
         'sweep_results': sweep_results,
     }
-    with open(os.path.join(results_dir, 'sweep_results.pkl'), 'wb') as f:
+    with open(os.path.join(results_dir, f'sweep_results{layer_suffix}.pkl'), 'wb') as f:
         pickle.dump(sweep_save, f)
 
-    print(f"\nSaved to {results_dir}/")
+    print(f"\nSaved to {results_dir}/ (suffix: '{layer_suffix}')")
     print("Done!")
 
 

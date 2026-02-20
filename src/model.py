@@ -12,6 +12,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, GPT2LMHeadModel, G
 # Short names → HuggingFace model IDs
 MODEL_ALIASES = {
     'qwen3-0.6b': 'Qwen/Qwen3-0.6B',
+    'qwen3-1.7b': 'Qwen/Qwen3-1.7B',
+    'qwen3-4b': 'Qwen/Qwen3-4B',
     'gemma-1-2b': 'google/gemma-2b',
     'gemma-2-2b': 'google/gemma-2-2b',
     'gemma-3-270m': 'google/gemma-3-270m',
@@ -92,7 +94,7 @@ def _run_block(block, hidden, model, pos_emb=None):
     return result
 
 
-def load_model(model_name='gpt2', device=None):
+def load_model(model_name='gpt2', device=None, dtype=None):
     """
     Load model and tokenizer.
 
@@ -101,6 +103,8 @@ def load_model(model_name='gpt2', device=None):
             GPT-2: 'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'
             Qwen: 'qwen3-0.6b'
         device: torch device (auto-detected if None)
+        dtype: torch dtype for model weights (e.g. torch.bfloat16).
+            None = float32 for most models, bfloat16 for Gemma3 multimodal.
 
     Returns:
         model, tokenizer, device
@@ -121,12 +125,14 @@ def load_model(model_name='gpt2', device=None):
     elif hf_name in GEMMA3_MULTIMODAL:
         # Multimodal Gemma 3 (4B+): use Gemma3ForCausalLM to extract text decoder
         from transformers import Gemma3ForCausalLM
-        model = Gemma3ForCausalLM.from_pretrained(hf_name, torch_dtype=torch.bfloat16).to(device)
+        load_dtype = dtype if dtype is not None else torch.bfloat16
+        model = Gemma3ForCausalLM.from_pretrained(hf_name, torch_dtype=load_dtype).to(device)
         tokenizer = AutoTokenizer.from_pretrained(hf_name)
         model_type = 'gemma3'
         d_model = model.config.hidden_size
     else:
-        model = AutoModelForCausalLM.from_pretrained(hf_name, torch_dtype=torch.float32).to(device)
+        load_dtype = dtype if dtype is not None else torch.float32
+        model = AutoModelForCausalLM.from_pretrained(hf_name, torch_dtype=load_dtype).to(device)
         tokenizer = AutoTokenizer.from_pretrained(hf_name)
         config_type = getattr(model.config, 'model_type', '')
         if config_type.startswith('gemma3'):

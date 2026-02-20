@@ -1,8 +1,8 @@
 """
-30 matched function signature sets across 8 programming languages for
+30 matched function signature sets across 9 programming languages for
 multi-contrastive steering experiments.
 
-Languages: Python, JavaScript, Java, C, Go, Rust, PHP, TypeScript
+Languages: Python, JavaScript, Java, C, Go, Rust, PHP, TypeScript, Lisp
 Each set expresses the same function concept as an opening signature.
 
 Used by scripts/directions/run_programming_contrastive.py to isolate
@@ -10,7 +10,7 @@ per-language feature directions via all-pairwise contrasts (Section 8
 of multi_contrastive_projection.pdf).
 """
 
-LANGUAGES = ['python', 'javascript', 'java', 'c', 'go', 'rust', 'php', 'typescript']
+LANGUAGES = ['python', 'javascript', 'java', 'c', 'go', 'rust', 'php', 'typescript', 'lisp', 'haskell']
 
 PROMPT_SETS = [
     # === Math ===
@@ -23,6 +23,8 @@ PROMPT_SETS = [
         'rust': "fn fibonacci(n: u32) -> u32 {",
         'php': "function fibonacci($n) {",
         'typescript': "function fibonacci(n: number): number {",
+        'lisp': "(defun fibonacci (n)",
+        'haskell': "fibonacci :: Int -> Int\nfibonacci n =",
     },
     {
         'python': "def factorial(n):",
@@ -33,6 +35,8 @@ PROMPT_SETS = [
         'rust': "fn factorial(n: u64) -> u64 {",
         'php': "function factorial($n) {",
         'typescript': "function factorial(n: number): number {",
+        'lisp': "(defun factorial (n)",
+        'haskell': "factorial :: Integer -> Integer\nfactorial n =",
     },
     {
         'python': "def is_prime(n):",
@@ -43,6 +47,8 @@ PROMPT_SETS = [
         'rust': "fn is_prime(n: u32) -> bool {",
         'php': "function isPrime($n) {",
         'typescript': "function isPrime(n: number): boolean {",
+        'lisp': "(defun is-prime (n)",
+        'haskell': "isPrime :: Int -> Bool\nisPrime n =",
     },
     {
         'python': "def gcd(a, b):",
@@ -53,6 +59,8 @@ PROMPT_SETS = [
         'rust': "fn gcd(a: u32, b: u32) -> u32 {",
         'php': "function gcd($a, $b) {",
         'typescript': "function gcd(a: number, b: number): number {",
+        'lisp': "(defun gcd-of (a b)",
+        'haskell': "myGcd :: Int -> Int -> Int\nmyGcd a b =",
     },
     {
         'python': "def power(base, exp):",
@@ -63,6 +71,8 @@ PROMPT_SETS = [
         'rust': "fn power(base: f64, exp: u32) -> f64 {",
         'php': "function power($base, $exp) {",
         'typescript': "function power(base: number, exp: number): number {",
+        'lisp': "(defun power (base exp)",
+        'haskell': "power :: Double -> Int -> Double\npower base exp =",
     },
     {
         'python': "def absolute_value(x):",
@@ -73,6 +83,8 @@ PROMPT_SETS = [
         'rust': "fn absolute_value(x: f64) -> f64 {",
         'php': "function absoluteValue($x) {",
         'typescript': "function absoluteValue(x: number): number {",
+        'lisp': "(defun absolute-value (x)",
+        'haskell': "absoluteValue :: Double -> Double\nabsoluteValue x =",
     },
     {
         'python': "def is_even(n):",
@@ -83,6 +95,8 @@ PROMPT_SETS = [
         'rust': "fn is_even(n: i32) -> bool {",
         'php': "function isEven($n) {",
         'typescript': "function isEven(n: number): boolean {",
+        'lisp': "(defun is-even (n)",
+        'haskell': "isEven :: Int -> Bool\nisEven n =",
     },
     {
         'python': "def to_binary(n):",
@@ -93,6 +107,8 @@ PROMPT_SETS = [
         'rust': "fn to_binary(n: u32) -> String {",
         'php': "function toBinary($n) {",
         'typescript': "function toBinary(n: number): string {",
+        'lisp': "(defun to-binary (n)",
+        'haskell': "toBinary :: Int -> String\ntoBinary n =",
     },
 
     # === Strings ===
@@ -105,6 +121,8 @@ PROMPT_SETS = [
         'rust': "fn reverse_string(s: &str) -> String {",
         'php': "function reverseString($s) {",
         'typescript': "function reverseString(s: string): string {",
+        'lisp': "(defun reverse-string (s)",
+        'haskell': "reverseString :: String -> String\nreverseString s =",
     },
     {
         'python': "def is_palindrome(s):",
@@ -115,6 +133,8 @@ PROMPT_SETS = [
         'rust': "fn is_palindrome(s: &str) -> bool {",
         'php': "function isPalindrome($s) {",
         'typescript': "function isPalindrome(s: string): boolean {",
+        'lisp': "(defun is-palindrome (s)",
+        'haskell': "isPalindrome :: String -> Bool\nisPalindrome s =",
     },
     {
         'python': "def count_words(text):",
@@ -125,6 +145,8 @@ PROMPT_SETS = [
         'rust': "fn count_words(text: &str) -> usize {",
         'php': "function countWords($text) {",
         'typescript': "function countWords(text: string): number {",
+        'lisp': "(defun count-words (text)",
+        'haskell': "countWords :: String -> Int\ncountWords text =",
     },
     {
         'python': "def capitalize_words(text):",
@@ -135,6 +157,8 @@ PROMPT_SETS = [
         'rust': "fn capitalize_words(text: &str) -> String {",
         'php': "function capitalizeWords($text) {",
         'typescript': "function capitalizeWords(text: string): string {",
+        'lisp': "(defun capitalize-words (text)",
+        'haskell': "capitalizeWords :: String -> String\ncapitalizeWords text =",
     },
     {
         'python': "def string_length(s):",
@@ -145,6 +169,8 @@ PROMPT_SETS = [
         'rust': "fn string_length(s: &str) -> usize {",
         'php': "function stringLength($s) {",
         'typescript': "function stringLength(s: string): number {",
+        'lisp': "(defun string-length (s)",
+        'haskell': "stringLength :: String -> Int\nstringLength s =",
     },
 
     # === Arrays / Lists ===
@@ -157,6 +183,8 @@ PROMPT_SETS = [
         'rust': "fn sort_list(arr: &mut Vec<i32>) {",
         'php': "function sortList($arr) {",
         'typescript': "function sortList(arr: number[]): number[] {",
+        'lisp': "(defun sort-list (lst)",
+        'haskell': "sortList :: Ord a => [a] -> [a]\nsortList xs =",
     },
     {
         'python': "def max_value(arr):",
@@ -167,6 +195,8 @@ PROMPT_SETS = [
         'rust': "fn max_value(arr: &[i32]) -> i32 {",
         'php': "function maxValue($arr) {",
         'typescript': "function maxValue(arr: number[]): number {",
+        'lisp': "(defun max-value (lst)",
+        'haskell': "maxValue :: [Int] -> Int\nmaxValue xs =",
     },
     {
         'python': "def min_value(arr):",
@@ -177,6 +207,8 @@ PROMPT_SETS = [
         'rust': "fn min_value(arr: &[i32]) -> i32 {",
         'php': "function minValue($arr) {",
         'typescript': "function minValue(arr: number[]): number {",
+        'lisp': "(defun min-value (lst)",
+        'haskell': "minValue :: [Int] -> Int\nminValue xs =",
     },
     {
         'python': "def binary_search(arr, target):",
@@ -187,6 +219,8 @@ PROMPT_SETS = [
         'rust': "fn binary_search(arr: &[i32], target: i32) -> Option<usize> {",
         'php': "function binarySearch($arr, $target) {",
         'typescript': "function binarySearch(arr: number[], target: number): number {",
+        'lisp': "(defun binary-search (lst target)",
+        'haskell': "binarySearch :: Ord a => [a] -> a -> Maybe Int\nbinarySearch xs target =",
     },
     {
         'python': "def contains(arr, item):",
@@ -197,6 +231,8 @@ PROMPT_SETS = [
         'rust': "fn contains(arr: &[i32], item: i32) -> bool {",
         'php': "function contains($arr, $item) {",
         'typescript': "function contains(arr: number[], item: number): boolean {",
+        'lisp': "(defun contains (lst item)",
+        'haskell': "contains :: Eq a => [a] -> a -> Bool\ncontains xs item =",
     },
     {
         'python': "def remove_duplicates(arr):",
@@ -207,6 +243,8 @@ PROMPT_SETS = [
         'rust': "fn remove_duplicates(arr: &mut Vec<i32>) {",
         'php': "function removeDuplicates($arr) {",
         'typescript': "function removeDuplicates(arr: number[]): number[] {",
+        'lisp': "(defun remove-duplicates (lst)",
+        'haskell': "removeDuplicates :: Eq a => [a] -> [a]\nremoveDuplicates xs =",
     },
     {
         'python': "def find_index(arr, target):",
@@ -217,6 +255,8 @@ PROMPT_SETS = [
         'rust': "fn find_index(arr: &[i32], target: i32) -> Option<usize> {",
         'php': "function findIndex($arr, $target) {",
         'typescript': "function findIndex(arr: number[], target: number): number {",
+        'lisp': "(defun find-index (lst target)",
+        'haskell': "findIndex :: Eq a => [a] -> a -> Maybe Int\nfindIndex xs target =",
     },
     {
         'python': "def sum_list(numbers):",
@@ -227,6 +267,8 @@ PROMPT_SETS = [
         'rust': "fn sum_list(numbers: &[i32]) -> i32 {",
         'php': "function sumList($numbers) {",
         'typescript': "function sumList(numbers: number[]): number {",
+        'lisp': "(defun sum-list (numbers)",
+        'haskell': "sumList :: [Int] -> Int\nsumList numbers =",
     },
     {
         'python': "def average(numbers):",
@@ -237,6 +279,8 @@ PROMPT_SETS = [
         'rust': "fn average(numbers: &[f64]) -> f64 {",
         'php': "function average($numbers) {",
         'typescript': "function average(numbers: number[]): number {",
+        'lisp': "(defun average (numbers)",
+        'haskell': "average :: [Double] -> Double\naverage numbers =",
     },
     {
         'python': "def flatten(nested):",
@@ -247,6 +291,8 @@ PROMPT_SETS = [
         'rust': "fn flatten(nested: Vec<Vec<i32>>) -> Vec<i32> {",
         'php': "function flatten($nested) {",
         'typescript': "function flatten(nested: number[][]): number[] {",
+        'lisp': "(defun flatten (nested)",
+        'haskell': "flatten :: [[a]] -> [a]\nflatten nested =",
     },
 
     # === Misc ===
@@ -259,6 +305,8 @@ PROMPT_SETS = [
         'rust': "fn read_file(path: &str) -> std::io::Result<String> {",
         'php': "function readFile($path) {",
         'typescript': "function readFile(path: string): string {",
+        'lisp': "(defun read-file (path)",
+        'haskell': "readFile :: FilePath -> IO String\nreadFile path =",
     },
     {
         'python': "def validate_email(email):",
@@ -269,6 +317,8 @@ PROMPT_SETS = [
         'rust': "fn validate_email(email: &str) -> bool {",
         'php': "function validateEmail($email) {",
         'typescript': "function validateEmail(email: string): boolean {",
+        'lisp': "(defun validate-email (email)",
+        'haskell': "validateEmail :: String -> Bool\nvalidateEmail email =",
     },
     {
         'python': "def calculate_distance(x1, y1, x2, y2):",
@@ -279,6 +329,8 @@ PROMPT_SETS = [
         'rust': "fn calculate_distance(x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {",
         'php': "function calculateDistance($x1, $y1, $x2, $y2) {",
         'typescript': "function calculateDistance(x1: number, y1: number, x2: number, y2: number): number {",
+        'lisp': "(defun calculate-distance (x1 y1 x2 y2)",
+        'haskell': "calculateDistance :: Double -> Double -> Double -> Double -> Double\ncalculateDistance x1 y1 x2 y2 =",
     },
     {
         'python': "def merge_sort(arr):",
@@ -289,6 +341,8 @@ PROMPT_SETS = [
         'rust': "fn merge_sort(arr: &mut Vec<i32>) {",
         'php': "function mergeSort($arr) {",
         'typescript': "function mergeSort(arr: number[]): number[] {",
+        'lisp': "(defun merge-sort (lst)",
+        'haskell': "mergeSort :: Ord a => [a] -> [a]\nmergeSort xs =",
     },
     {
         'python': "def depth_first_search(graph, start):",
@@ -299,6 +353,8 @@ PROMPT_SETS = [
         'rust': "fn depth_first_search(graph: &HashMap<i32, Vec<i32>>, start: i32) -> Vec<i32> {",
         'php': "function depthFirstSearch($graph, $start) {",
         'typescript': "function depthFirstSearch(graph: Map<number, number[]>, start: number): number[] {",
+        'lisp': "(defun depth-first-search (graph start)",
+        'haskell': "depthFirstSearch :: Ord a => Map a [a] -> a -> [a]\ndepthFirstSearch graph start =",
     },
     {
         'python': "def matrix_multiply(a, b):",
@@ -309,6 +365,8 @@ PROMPT_SETS = [
         'rust': "fn matrix_multiply(a: &Vec<Vec<i32>>, b: &Vec<Vec<i32>>) -> Vec<Vec<i32>> {",
         'php': "function matrixMultiply($a, $b) {",
         'typescript': "function matrixMultiply(a: number[][], b: number[][]): number[][] {",
+        'lisp': "(defun matrix-multiply (a b)",
+        'haskell': "matrixMultiply :: [[Int]] -> [[Int]] -> [[Int]]\nmatrixMultiply a b =",
     },
 ]
 
