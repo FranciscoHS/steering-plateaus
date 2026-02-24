@@ -20,6 +20,10 @@ MODEL_ALIASES = {
     'gemma-3-1b': 'google/gemma-3-1b-pt',
     'gemma-3-4b': 'google/gemma-3-4b-pt',
     'gemma-3-12b': 'google/gemma-3-12b-pt',
+    'csp': 'openai/circuit-sparsity',
+    'dense_csp_1x': 'dense1_1x',
+    'dense_csp_2x': 'dense1_2x',
+    'dense_csp_4x': 'dense1_4x',
 }
 
 # Multimodal Gemma 3 models (4B+) need Gemma3ForCausalLM to extract the text decoder
@@ -28,6 +32,9 @@ GEMMA3_MULTIMODAL = {'google/gemma-3-4b-pt', 'google/gemma-3-12b-pt', 'google/ge
 
 def _get_blocks(model):
     """Get the list of transformer blocks."""
+    model_type = getattr(model, '_plateau_info', {}).get('model_type', '')
+    if model_type == 'circuitgpt':
+        return model.circuit_model.transformer.h
     if hasattr(model, 'transformer'):  # GPT-2
         return model.transformer.h
     elif hasattr(model, 'model') and hasattr(model.model, 'layers'):  # Llama/Qwen
@@ -37,6 +44,9 @@ def _get_blocks(model):
 
 def _get_final_norm(model):
     """Get the final layer norm."""
+    model_type = getattr(model, '_plateau_info', {}).get('model_type', '')
+    if model_type == 'circuitgpt':
+        return model.circuit_model.transformer.ln_f
     if hasattr(model, 'transformer'):  # GPT-2
         return model.transformer.ln_f
     elif hasattr(model, 'model') and hasattr(model.model, 'norm'):  # Llama/Qwen
@@ -46,6 +56,9 @@ def _get_final_norm(model):
 
 def _get_lm_head(model):
     """Get the language model head (unembedding)."""
+    model_type = getattr(model, '_plateau_info', {}).get('model_type', '')
+    if model_type == 'circuitgpt':
+        return model.circuit_model.lm_head
     return model.lm_head
 
 
@@ -73,6 +86,23 @@ def _get_position_embeddings(model, hidden_states):
     return model.model.rotary_emb(hidden_states, position_ids)
 
 
+def _is_cat_pos_emb_model(model):
+    """True for models that concatenate position embeddings per-block (circuitgpt with d_pos_emb)."""
+    if not (hasattr(model, '_plateau_info') and model._plateau_info['model_type'] == 'circuitgpt'):
+        return False
+    # Only models with d_pos_emb set use BlockCatPosEmb; dense baselines use regular Block
+    return getattr(model.circuit_model.config, 'd_pos_emb', None) is not None
+
+
+def _get_cat_pos_emb(model, seq_len):
+    """Get concatenated position embeddings for circuitgpt.
+
+    Returns:
+        pos_emb: [1, seq_len, 32] tensor
+    """
+    return model.circuit_model.transformer.wpe.weight[:seq_len].unsqueeze(0)
+
+
 def _run_block(block, hidden, model, pos_emb=None):
     """Run a single transformer block, handling different architectures.
 
@@ -86,6 +116,9 @@ def _run_block(block, hidden, model, pos_emb=None):
                        position_embeddings_local=local_emb)
     elif model_type == 'llama':
         result = block(hidden, position_embeddings=pos_emb)
+    elif model_type == 'circuitgpt' and pos_emb is not None:
+        # BlockCatPosEmb.forward(x, pos_emb_to_cat)
+        result = block(hidden, pos_emb)
     else:
         result = block(hidden)
     # Unpack tuple if needed (GPT-2 style)
@@ -117,7 +150,60 @@ def load_model(model_name='gpt2', device=None, dtype=None):
     # Detect architecture type
     is_gpt2 = model_name.startswith('gpt2')
 
-    if is_gpt2:
+    is_csp = model_name.startswith('csp')
+    is_dense_csp = model_name.startswith('dense_csp')
+
+    if is_dense_csp:
+        # Load dense CSP baseline via native circuit_sparsity loader
+        # Workaround: the installed package's GPTConfig doesn't accept all config
+        # fields from the blob storage configs, so we filter kwargs manually.
+        from circuit_sparsity.inference.gpt import GPTConfig as _CspGPTConfig, GPT as _CspGPT
+        import json as _json, inspect as _inspect, io as _io
+        from circuit_sparsity.registries import read_file_cached
+        blob_base = "https://openaipublic.blob.core.windows.net/circuit-sparsity"
+        csp_name = MODEL_ALIASES[model_name]
+        model_path = f"{blob_base}/models/{csp_name}"
+        beeg_config = _json.loads(read_file_cached(f"{model_path}/beeg_config.json").decode())
+        if "n_mlp" in beeg_config:
+            beeg_config["d_mlp"] = beeg_config.pop("n_mlp")
+        beeg_config["flash"] = False
+        beeg_config["grad_checkpointing"] = False
+        beeg_config.setdefault("sink", False)
+        beeg_config.pop("use_tied_aux_matrix", None)
+        # Filter to only accepted kwargs
+        valid_keys = set(_inspect.signature(_CspGPTConfig.__init__).parameters.keys()) - {"self"}
+        filtered = {k: v for k, v in beeg_config.items() if k in valid_keys}
+        config = _CspGPTConfig(**filtered)
+        gpt = _CspGPT(config)
+        sd = torch.load(
+            _io.BytesIO(read_file_cached(f"{model_path}/final_model.pt")),
+            weights_only=True, map_location=device
+        )
+        if "final_logits_bias" not in sd:
+            sd["final_logits_bias"] = torch.zeros(config.vocab_size)
+        gpt.load_state_dict(sd, strict=False)
+        gpt.to(device).eval()
+        # Wrap in a namespace so _get_blocks etc. find model.circuit_model.transformer.*
+        class _Wrapper(torch.nn.Module):
+            def __init__(self, gpt_model):
+                super().__init__()
+                self.circuit_model = gpt_model
+                self.config = type('Config', (), {'vocab_size': gpt_model.config.vocab_size})()
+        model = _Wrapper(gpt)
+        if device != "cpu":
+            model = model.to(device)
+        tokenizer = None
+        model_type = 'circuitgpt'
+        d_model = gpt.config.d_model
+    elif is_csp:
+        load_dtype = dtype if dtype is not None else torch.float32
+        model = AutoModelForCausalLM.from_pretrained(
+            hf_name, dtype=load_dtype, trust_remote_code=True
+        ).to(device)
+        tokenizer = None  # CSP uses random token sequences, no tokenizer needed
+        model_type = 'circuitgpt'
+        d_model = model.config.d_model
+    elif is_gpt2:
         model = GPT2LMHeadModel.from_pretrained(hf_name).to(device)
         tokenizer = GPT2Tokenizer.from_pretrained(hf_name)
         model_type = 'gpt2'
@@ -141,7 +227,7 @@ def load_model(model_name='gpt2', device=None, dtype=None):
             model_type = 'llama'  # Llama-architecture (Qwen3, Llama, Gemma 1/2, etc.)
         d_model = model.config.hidden_size
 
-    if tokenizer.pad_token is None:
+    if tokenizer is not None and tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     model.eval()
@@ -248,12 +334,14 @@ def forward_from_layer(model, context, point, start_layer):
     hidden = torch.cat([context_batch, point], dim=1)
 
     blocks = _get_blocks(model)
-    rope = _is_rope_model(model)
-    if rope:
+    pos_emb = None
+    if _is_rope_model(model):
         pos_emb = _get_position_embeddings(model, hidden)
+    elif _is_cat_pos_emb_model(model):
+        pos_emb = _get_cat_pos_emb(model, hidden.shape[1])
 
     for block in blocks[start_layer + 1:]:
-        hidden = _run_block(block, hidden, model, pos_emb if rope else None)
+        hidden = _run_block(block, hidden, model, pos_emb)
 
     hidden = _get_final_norm(model)(hidden)
     logits = _get_lm_head(model)(hidden[:, -1, :])
@@ -282,12 +370,14 @@ def forward_from_layer_to_layer(model, context, point, start_layer, end_layer):
     hidden = torch.cat([context_batch, point], dim=1)
 
     blocks = _get_blocks(model)
-    rope = _is_rope_model(model)
-    if rope:
+    pos_emb = None
+    if _is_rope_model(model):
         pos_emb = _get_position_embeddings(model, hidden)
+    elif _is_cat_pos_emb_model(model):
+        pos_emb = _get_cat_pos_emb(model, hidden.shape[1])
 
     for block in blocks[start_layer + 1:end_layer + 1]:
-        hidden = _run_block(block, hidden, model, pos_emb if rope else None)
+        hidden = _run_block(block, hidden, model, pos_emb)
 
     return hidden[:, -1, :]
 
@@ -312,12 +402,14 @@ def forward_from_layer_to_final(model, context, point, start_layer):
     hidden = torch.cat([context_batch, point], dim=1)
 
     blocks = _get_blocks(model)
-    rope = _is_rope_model(model)
-    if rope:
+    pos_emb = None
+    if _is_rope_model(model):
         pos_emb = _get_position_embeddings(model, hidden)
+    elif _is_cat_pos_emb_model(model):
+        pos_emb = _get_cat_pos_emb(model, hidden.shape[1])
 
     for block in blocks[start_layer + 1:]:
-        hidden = _run_block(block, hidden, model, pos_emb if rope else None)
+        hidden = _run_block(block, hidden, model, pos_emb)
 
     return hidden[:, -1, :]
 
@@ -341,12 +433,14 @@ def forward_from_layer_allpos(model, hidden_states, start_layer):
     hidden = hidden_states
 
     blocks = _get_blocks(model)
-    rope = _is_rope_model(model)
-    if rope:
+    pos_emb = None
+    if _is_rope_model(model):
         pos_emb = _get_position_embeddings(model, hidden)
+    elif _is_cat_pos_emb_model(model):
+        pos_emb = _get_cat_pos_emb(model, hidden.shape[1])
 
     for block in blocks[start_layer + 1:]:
-        hidden = _run_block(block, hidden, model, pos_emb if rope else None)
+        hidden = _run_block(block, hidden, model, pos_emb)
 
     hidden = _get_final_norm(model)(hidden)
     logits = _get_lm_head(model)(hidden[:, -1, :])

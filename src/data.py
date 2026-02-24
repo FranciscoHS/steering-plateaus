@@ -9,6 +9,68 @@ import numpy as np
 from datasets import load_dataset
 
 
+def generate_random_token_sequences(n, vocab_size, seq_len, seed=42):
+    """
+    Generate random token sequences from a uniform distribution over the vocabulary.
+
+    Useful for models trained on synthetic data (e.g., CSP/circuitgpt) where
+    natural text is not appropriate.
+
+    Args:
+        n: Number of sequences to generate
+        vocab_size: Size of token vocabulary
+        seq_len: Length of each sequence
+        seed: Random seed
+
+    Returns:
+        token_ids_list: list of n tensors, each [seq_len]
+    """
+    torch.manual_seed(seed)
+    token_ids_list = [torch.randint(0, vocab_size, (seq_len,)) for _ in range(n)]
+    print(f"Generated {n} random token sequences (vocab_size={vocab_size}, seq_len={seq_len})")
+    return token_ids_list
+
+
+def load_python_code_fixed_length(n, tokenizer, seq_len=5, seed=42):
+    """
+    Load Python code from CodeParrot and tokenize to fixed-length sequences.
+
+    Uses the CSP model's custom tokenizer. Each sample is a seq_len-token
+    subsequence drawn from real Python files.
+
+    Args:
+        n: Number of sequences to return
+        tokenizer: CSP tokenizer (from AutoTokenizer with trust_remote_code)
+        seq_len: Exact token length for each sequence
+        seed: Random seed for dataset shuffling
+
+    Returns:
+        token_ids_list: list of n tensors, each [seq_len]
+    """
+    dataset = load_dataset(
+        "codeparrot/codeparrot-clean",
+        split="train",
+        streaming=True
+    )
+    dataset = dataset.shuffle(seed=seed, buffer_size=10000)
+
+    token_ids_list = []
+
+    for sample in dataset:
+        code = sample['content']
+        ids = tokenizer.encode(code)
+        # Extract as many non-overlapping seq_len chunks as possible
+        for start in range(0, len(ids) - seq_len + 1, seq_len):
+            token_ids_list.append(torch.tensor(ids[start:start + seq_len], dtype=torch.long))
+            if len(token_ids_list) >= n:
+                break
+        if len(token_ids_list) >= n:
+            break
+
+    print(f"Loaded {len(token_ids_list)} Python code sequences (each {seq_len} tokens)")
+    return token_ids_list
+
+
 def load_fineweb_samples(n, tokenizer, min_tokens=10, max_tokens=512, seed=42):
     """
     Load and tokenize samples from FineWeb.
@@ -150,10 +212,18 @@ def sample_random_activations_v2(real_activations, n, mode='full', seed=42, devi
         try:
             L = torch.linalg.cholesky(cov)
         except torch.linalg.LinAlgError:
-            # Add small regularization if not positive definite (numerical issues)
-            reg = 1e-6 * torch.trace(cov) / D
-            print(f"Cholesky failed, adding regularization eps={reg.item():.2e}")
-            L = torch.linalg.cholesky(cov + reg * torch.eye(D, device=device))
+            # Add regularization, increasing until Cholesky succeeds
+            eye = torch.eye(D, device=device)
+            for scale in [1e-6, 1e-5, 1e-4, 1e-3]:
+                reg = scale * torch.trace(cov) / D
+                print(f"Cholesky failed, trying regularization eps={reg.item():.2e}")
+                try:
+                    L = torch.linalg.cholesky(cov + reg * eye)
+                    break
+                except torch.linalg.LinAlgError:
+                    continue
+            else:
+                raise RuntimeError("Cholesky failed even with large regularization")
         z = torch.randn(n, D, device=device)
         samples = mean.unsqueeze(0) + z @ L.T
         rank = torch.linalg.matrix_rank(cov).item()

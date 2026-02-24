@@ -30,17 +30,36 @@ from src.model import (
     load_model, forward_from_layer_to_final, forward_from_layer_to_layer,
     _get_final_norm, _get_lm_head, _get_blocks,
 )
-from src.data import load_fineweb_fixed_length
+from src.data import load_fineweb_fixed_length, generate_random_token_sequences, load_python_code_fixed_length
 
 
 def extract_context_and_activation(model, tokenizer, token_ids_list, layer, device, batch_size=64):
     all_contexts = []
     all_activations = []
+    is_circuitgpt = model._plateau_info['model_type'] == 'circuitgpt'
+
     for i in range(0, len(token_ids_list), batch_size):
         batch_tokens = torch.stack(token_ids_list[i:i+batch_size]).to(device)
         with torch.no_grad():
-            outputs = model(batch_tokens, output_hidden_states=True)
-        hidden = outputs.hidden_states[layer + 1]
+            if is_circuitgpt:
+                # CSP doesn't support output_hidden_states; run embedding + blocks manually
+                gpt = model.circuit_model
+                tok_emb = gpt.transformer.wte(batch_tokens)
+                x = gpt.transformer.drop(tok_emb)
+                seq_len = batch_tokens.shape[1]
+                has_cat_pos = getattr(gpt.config, 'd_pos_emb', None) is not None
+                if has_cat_pos:
+                    pos_emb = gpt.transformer.wpe.weight[:seq_len].unsqueeze(0)
+                else:
+                    # Dense CSP: add position embeddings to residual stream (GPT-2 style)
+                    positions = torch.arange(seq_len, device=device).unsqueeze(0)
+                    x = x + gpt.transformer.wpe(positions)
+                for block in gpt.transformer.h[:layer + 1]:
+                    x = block(x, pos_emb) if has_cat_pos else block(x)
+                hidden = x
+            else:
+                outputs = model(batch_tokens, output_hidden_states=True)
+                hidden = outputs.hidden_states[layer + 1]
         all_contexts.append(hidden[:, :-1, :].float().cpu())
         all_activations.append(hidden[:, -1, :].float().cpu())
     return torch.cat(all_contexts, 0), torch.cat(all_activations, 0)
@@ -150,6 +169,9 @@ def main():
                         help='Path to delta optimization results .pkl. Compares real vs real+delta instead of real vs random.')
     parser.add_argument('--measure_layer', type=int, default=None,
                         help='Layer at which to measure L2 distance (default: final layer)')
+    parser.add_argument('--data_source', type=str, default='auto',
+                        choices=['auto', 'fineweb', 'random', 'python_code'],
+                        help='Data source: fineweb, random tokens, python_code, or auto (python_code for circuitgpt)')
     parser.add_argument('--results_dir', type=str, default=None)
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
@@ -189,10 +211,26 @@ def main():
     print(f"Device: {device}, d_model: {d_model}, n_layers: {n_layers}"
           + (f", measure_layer: {args.measure_layer}" if args.measure_layer is not None else ""))
 
+    # Resolve data source
+    data_source = args.data_source
+    if data_source == 'auto':
+        data_source = 'python_code' if model._plateau_info['model_type'] == 'circuitgpt' else 'fineweb'
+
     # Extract activations
     n_load = max(args.n_act, args.n_fit) if args.cov_matched else args.n_act
-    print(f"Loading {n_load} FineWeb sequences...")
-    token_ids_list = load_fineweb_fixed_length(n_load, tokenizer, seq_len=args.seq_len, seed=args.seed)
+    if data_source == 'random':
+        vocab_size = model.config.vocab_size if hasattr(model.config, 'vocab_size') else model.circuit_model.config.vocab_size
+        print(f"Generating {n_load} random token sequences (vocab_size={vocab_size})...")
+        token_ids_list = generate_random_token_sequences(n_load, vocab_size, args.seq_len, seed=args.seed)
+    elif data_source == 'python_code':
+        from transformers import AutoTokenizer
+        print(f"Loading CSP tokenizer...")
+        csp_tokenizer = AutoTokenizer.from_pretrained("openai/circuit-sparsity", trust_remote_code=True)
+        print(f"Loading {n_load} Python code sequences...")
+        token_ids_list = load_python_code_fixed_length(n_load, csp_tokenizer, seq_len=args.seq_len, seed=args.seed)
+    else:
+        print(f"Loading {n_load} FineWeb sequences...")
+        token_ids_list = load_fineweb_fixed_length(n_load, tokenizer, seq_len=args.seq_len, seed=args.seed)
     print(f"Extracting layer-{args.layer} activations...")
     all_contexts, all_activations = extract_context_and_activation(
         model, tokenizer, token_ids_list, args.layer, device
