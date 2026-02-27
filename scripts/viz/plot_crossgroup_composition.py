@@ -8,70 +8,75 @@ nearly orthogonal features (cos = 0.014) compose additively.
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from textwrap import fill
 
-# --- Curated snippets from fibonacci(n) { prompt, steered at 30° ---
+# --- Curated snippets from "// This function calculates" prompt, steered at 30° ---
 
 snippets = {
     (0, 0): {  # baseline
         "label": "Baseline",
         "code": (
-            "if(n <= 0) return 0;\n"
-            "if(n == 1) return 1;\n"
-            "return fibonacci(n-1)\n"
-            "     + fibonacci(n-2);\n"
-            "}\n\n"
-            "function fibonacci(n) {\n"
-            "  if(n <= 0) return 0;\n"
-            "  if(n == 1) return 1;\n"
-            "  ..."
+            "// the sum of all numbers in a\n"
+            "// given array.\n\n"
+            "function sumNumbers(arr) {\n"
+            "  let total = 0;\n"
+            "  for (let i = 0; i < arr.length;\n"
+            "       i++) {\n"
+            "    total += arr[i];\n"
+            "  }\n"
+            "  return total;\n"
+            "}"
         ),
         "desc": "JavaScript",
     },
     (1, 0): {  # +C only
         "label": "+C only",
         "code": (
-            "if (n <= 1) return n;\n"
-            "else return fibonacci(n-1)\n"
-            "          + fibonacci(n-2);\n"
-            "}\n\n"
-            "// O(n) time\n"
-            "// O(1) space\n"
-            "// But for large numbers,\n"
-            "// not acceptable. Use\n"
-            "// memoization."
+            "// the time difference between\n"
+            "// two given times in HH:MM:SS.\n\n"
+            "#include <iostream>\n"
+            "using namespace std;\n\n"
+            "int timeDifference(\n"
+            "    string t1, string t2) {\n"
+            "  int sec1 = convertToSeconds(t1);\n"
+            "  int sec2 = convertToSeconds(t2);\n"
+            "  int diff = abs(sec1 - sec2);"
         ),
-        "desc": "C-style + English comments",
+        "desc": "C++",
     },
     (0, 1): {  # +RU only
         "label": "+RU only",
         "code": (
-            "if (n === 0) return 0\n"
-            "if (n === 1) return 1\n"
-            "return fibonacci(n-1)\n"
-            "     + fibonacci(n-2)\n"
-            "}\n\n"
-            "// Реализуй функцию,\n"
-            "// которая по номеру n\n"
-            "// возвращает n-е число\n"
-            "// Фибоначчи"
+            "// the sum of numbers from 1 to N\n"
+            "function sumFor(n) {\n"
+            "  let sum = 0;\n"
+            "  for (let i=1; i<=n; i++) sum+=i;\n"
+            "  return sum;\n"
+            "}\n"
+            "// sum of numbers from 1 до N\n"
+            "// using while цикл\n"
+            "function sumWhile(n) { ... }\n"
+            "// This функция calculates...\n"
+            "// используя цикл do while\n"
+            "function sumДо"
         ),
-        "desc": "JavaScript + Russian comments",
+        "desc": "JavaScript + Russian creeping in",
     },
     (1, 1): {  # +RU+C combined
         "label": "+RU + C",
         "code": (
-            "if (n==0 || n==1)\n"
-            "    return 1;\n"
-            "else\n"
-            "    return fibonacci(n-1)\n"
-            "         + fibonacci(n-2);\n"
-            "}\n\n"
-            "// Реализация рекурсивного\n"
-            "// Плюсы: простая реализация\n"
-            "// Минус: медленная"
+            "int sum(int x, int y) {\n"
+            "  int sum;\n"
+            "  sum = x + y;\n"
+            "  return sum;\n"
+            "}\n"
+            "// This function умножает два числа\n"
+            "int multiply(int x, int y) {\n"
+            "  ...\n"
+            "}\n"
+            "// This function делит два числа\n"
+            "float division(int x, int y) {"
         ),
-        "desc": "C-style + Russian comments",
+        "desc": "C + Russian comments",
     },
 }
 
@@ -91,10 +96,10 @@ border_colors = {
 }
 
 # --- Figure ---
-fig, axes = plt.subplots(2, 2, figsize=(10, 9))
+fig, axes = plt.subplots(2, 2, figsize=(10.5, 9.5))
 fig.suptitle(
     'Compositional Steering: Russian × C\n'
-    'Prompt: "fibonacci(n) {"  ·  Qwen3-4B layer 14  ·  30° steering  ·  cos(RU, C) = 0.014',
+    'Prompt: "// This function calculates"  ·  Qwen3-4B layer 14  ·  30°  ·  cos(RU, C) = 0.014',
     fontsize=13, fontweight='bold', y=0.98
 )
 
@@ -125,16 +130,16 @@ for (cx, ry), snippet in snippets.items():
             va='top', ha='right', color='#555555')
 
     # Code snippet (monospace, centered)
-    ax.text(0.50, 0.48, snippet["code"], fontsize=8.5,
+    ax.text(0.50, 0.46, snippet["code"], fontsize=8.0,
             fontfamily='monospace', va='center', ha='center',
             color='#1a1a1a',
             bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
                       edgecolor='#cccccc', alpha=0.85))
 
 # Axis labels
-fig.text(0.5, 0.02, '← no C steering          C feature →', ha='center',
+fig.text(0.5, 0.02, '← no C steering              C feature →', ha='center',
          fontsize=12, fontweight='bold', color='#4a86c8')
-fig.text(0.01, 0.5, '← no RU steering          RU feature →', ha='center',
+fig.text(0.01, 0.5, '← no RU steering              RU feature →', ha='center',
          fontsize=12, fontweight='bold', color='#c84a5a',
          rotation=90)
 

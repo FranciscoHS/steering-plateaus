@@ -24,6 +24,8 @@ MODEL_ALIASES = {
     'dense_csp_1x': 'dense1_1x',
     'dense_csp_2x': 'dense1_2x',
     'dense_csp_4x': 'dense1_4x',
+    'chess_16L': 'lichess_16layers_ckpt_no_optimizer.pt',
+    'chess_8L': 'lichess_8layers_ckpt_no_optimizer.pt',
 }
 
 # Multimodal Gemma 3 models (4B+) need Gemma3ForCausalLM to extract the text decoder
@@ -149,11 +151,41 @@ def load_model(model_name='gpt2', device=None, dtype=None):
 
     # Detect architecture type
     is_gpt2 = model_name.startswith('gpt2')
+    is_chess = model_name.startswith('chess')
 
     is_csp = model_name.startswith('csp')
     is_dense_csp = model_name.startswith('dense_csp')
 
-    if is_dense_csp:
+    if is_chess:
+        # nanoGPT chess model (adamkarvonen/chess_llms) loaded into HF GPT-2
+        from huggingface_hub import hf_hub_download
+        ckpt_file = MODEL_ALIASES[model_name]
+        n_layers = 16 if '16' in model_name else 8
+        path = hf_hub_download('adamkarvonen/chess_llms', ckpt_file)
+        checkpoint = torch.load(path, map_location='cpu', weights_only=False)
+        raw_sd = checkpoint['model']
+        # Convert nanoGPT -> HF GPT-2 format (transpose Conv1D weights, strip prefix)
+        sd = {}
+        for k, v in raw_sd.items():
+            if k.startswith('_orig_mod.'):
+                k = k[len('_orig_mod.'):]
+            if '.attn.c_attn.weight' in k or '.attn.c_proj.weight' in k or \
+               '.mlp.c_fc.weight' in k or '.mlp.c_proj.weight' in k:
+                v = v.T
+            sd[k] = v
+        from transformers import GPT2Config
+        config = GPT2Config(
+            vocab_size=32, n_positions=1023, n_embd=512, n_layer=n_layers,
+            n_head=8, n_inner=2048, activation_function='gelu',
+            resid_pdrop=0.0, embd_pdrop=0.0, attn_pdrop=0.0,
+        )
+        model = GPT2LMHeadModel(config)
+        model.load_state_dict(sd, strict=False)
+        model.to(device)
+        tokenizer = None  # Character-level encoding handled by data loader
+        model_type = 'gpt2'
+        d_model = 512
+    elif is_dense_csp:
         # Load dense CSP baseline via native circuit_sparsity loader
         # Workaround: the installed package's GPTConfig doesn't accept all config
         # fields from the blob storage configs, so we filter kwargs manually.

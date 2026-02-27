@@ -57,6 +57,7 @@ def main():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--v1_results', type=str, default='results/delta_opt/results_r66.pkl')
     parser.add_argument('--v2_results', type=str, default='results/delta_opt_v2/results_r66.pkl')
+    parser.add_argument('--v3b_results', type=str, default='results/delta_opt_v3b/results_r66.pkl')
     parser.add_argument('--results_dir', type=str, default='results/delta_steer_spherical')
     args = parser.parse_args()
 
@@ -64,11 +65,15 @@ def main():
 
     # Load deltas
     deltas = {}
-    for label, path in [('v1 (minimize)', args.v1_results), ('v2 (match)', args.v2_results)]:
-        with open(path, 'rb') as f:
-            results = pickle.load(f)
-        deltas[label] = results['delta']
-        print(f"Loaded {label}: norm={results['delta'].norm().item():.1f}")
+    for label, path in [('v1 (minimize)', args.v1_results), ('v2 (match)', args.v2_results),
+                         ('v3b (sv+frob)', args.v3b_results)]:
+        if os.path.exists(path):
+            with open(path, 'rb') as f:
+                results = pickle.load(f)
+            deltas[label] = results['delta']
+            print(f"Loaded {label}: norm={results['delta'].norm().item():.1f}")
+        else:
+            print(f"Skipping {label}: {path} not found")
 
     # Load model
     print(f"\nLoading model: {args.model}")
@@ -113,7 +118,9 @@ def main():
     bins = np.linspace(0, 10, 30)
     base_arr = np.array(entropies['base'])
 
-    for label, color in [('v1 (minimize)', 'C1'), ('v2 (match)', 'C2')]:
+    for label, color in [('v1 (minimize)', 'C1'), ('v2 (match)', 'C2'), ('v3b (sv+frob)', 'C3')]:
+        if label not in entropies:
+            continue
         fig, ax = plt.subplots(figsize=(6, 4))
         shifted_arr = np.array(entropies[label])
 

@@ -31,6 +31,70 @@ def generate_random_token_sequences(n, vocab_size, seq_len, seed=42):
     return token_ids_list
 
 
+def generate_chess_games(n, seq_len, seed=42):
+    """
+    Generate random legal chess games as character-level token sequences.
+
+    Uses the nanoGPT chess model's character-level vocabulary (32 tokens).
+    Games are in PGN-like format starting with ';' delimiter.
+
+    Args:
+        n: Number of sequences to generate
+        seq_len: Length of each sequence in characters/tokens
+        seed: Random seed
+
+    Returns:
+        token_ids_list: list of n tensors, each [seq_len]
+    """
+    import chess
+    import random
+    random.seed(seed)
+
+    # Character-level vocab from meta.pkl
+    stoi = {' ': 0, '#': 1, '+': 2, '-': 3, '.': 4, '0': 5, '1': 6, '2': 7,
+            '3': 8, '4': 9, '5': 10, '6': 11, '7': 12, '8': 13, '9': 14,
+            ';': 15, '=': 16, 'B': 17, 'K': 18, 'N': 19, 'O': 20, 'Q': 21,
+            'R': 22, 'a': 23, 'b': 24, 'c': 25, 'd': 26, 'e': 27, 'f': 28,
+            'g': 29, 'h': 30, 'x': 31}
+
+    def game_to_pgn(board):
+        """Convert a board's move stack to PGN string."""
+        pgn = ";"
+        temp = chess.Board()
+        for i, move in enumerate(board.move_stack):
+            if i % 2 == 0:
+                pgn += f"{i//2 + 1}."
+            pgn += temp.san(move) + " "
+            temp.push(move)
+        return pgn
+
+    token_ids_list = []
+    attempts = 0
+    while len(token_ids_list) < n and attempts < n * 20:
+        attempts += 1
+        board = chess.Board()
+        # Play random moves until game ends or we have enough characters
+        max_moves = seq_len  # generous upper bound
+        for _ in range(max_moves):
+            legal = list(board.legal_moves)
+            if not legal:
+                break
+            board.push(random.choice(legal))
+
+        pgn = game_to_pgn(board)
+        # Check all characters are in vocab
+        if not all(c in stoi for c in pgn):
+            continue
+        if len(pgn) < seq_len:
+            continue
+
+        tokens = torch.tensor([stoi[c] for c in pgn[:seq_len]], dtype=torch.long)
+        token_ids_list.append(tokens)
+
+    print(f"Generated {len(token_ids_list)} chess game sequences (each {seq_len} chars)")
+    return token_ids_list
+
+
 def load_python_code_fixed_length(n, tokenizer, seq_len=5, seed=42):
     """
     Load Python code from CodeParrot and tokenize to fixed-length sequences.

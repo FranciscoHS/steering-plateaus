@@ -30,7 +30,7 @@ from src.model import (
     load_model, forward_from_layer_to_final, forward_from_layer_to_layer,
     _get_final_norm, _get_lm_head, _get_blocks,
 )
-from src.data import load_fineweb_fixed_length, generate_random_token_sequences, load_python_code_fixed_length
+from src.data import load_fineweb_fixed_length, generate_random_token_sequences, load_python_code_fixed_length, generate_chess_games
 
 
 def extract_context_and_activation(model, tokenizer, token_ids_list, layer, device, batch_size=64):
@@ -170,8 +170,8 @@ def main():
     parser.add_argument('--measure_layer', type=int, default=None,
                         help='Layer at which to measure L2 distance (default: final layer)')
     parser.add_argument('--data_source', type=str, default='auto',
-                        choices=['auto', 'fineweb', 'random', 'python_code'],
-                        help='Data source: fineweb, random tokens, python_code, or auto (python_code for circuitgpt)')
+                        choices=['auto', 'fineweb', 'random', 'python_code', 'chess'],
+                        help='Data source: fineweb, random tokens, python_code, chess, or auto')
     parser.add_argument('--results_dir', type=str, default=None)
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
@@ -214,7 +214,12 @@ def main():
     # Resolve data source
     data_source = args.data_source
     if data_source == 'auto':
-        data_source = 'python_code' if model._plateau_info['model_type'] == 'circuitgpt' else 'fineweb'
+        if args.model.startswith('chess'):
+            data_source = 'chess'
+        elif model._plateau_info['model_type'] == 'circuitgpt':
+            data_source = 'python_code'
+        else:
+            data_source = 'fineweb'
 
     # Extract activations
     n_load = max(args.n_act, args.n_fit) if args.cov_matched else args.n_act
@@ -228,6 +233,9 @@ def main():
         csp_tokenizer = AutoTokenizer.from_pretrained("openai/circuit-sparsity", trust_remote_code=True)
         print(f"Loading {n_load} Python code sequences...")
         token_ids_list = load_python_code_fixed_length(n_load, csp_tokenizer, seq_len=args.seq_len, seed=args.seed)
+    elif data_source == 'chess':
+        print(f"Generating {n_load} chess game sequences...")
+        token_ids_list = generate_chess_games(n_load, args.seq_len, seed=args.seed)
     else:
         print(f"Loading {n_load} FineWeb sequences...")
         token_ids_list = load_fineweb_fixed_length(n_load, tokenizer, seq_len=args.seq_len, seed=args.seed)

@@ -47,9 +47,12 @@ def main():
     parser.add_argument('--n_act', type=int, default=100)
     parser.add_argument('--n_random_dirs', type=int, default=10)
     parser.add_argument('--n_angles', type=int, default=60)
-    parser.add_argument('--which', type=str, default='both', choices=['v1', 'v2', 'both'])
+    parser.add_argument('--which', type=str, default='both', choices=['v1', 'v2', 'v3b', 'v4', 'v5', 'both', 'all'])
     parser.add_argument('--v1_results', type=str, default='results/delta_opt/results_r66.pkl')
     parser.add_argument('--v2_results', type=str, default='results/delta_opt_v2/results_r66.pkl')
+    parser.add_argument('--v3b_results', type=str, default='results/delta_opt_v3b/results_r66.pkl')
+    parser.add_argument('--v4_results', type=str, default='results/delta_opt_v4/results_50.0deg.pkl')
+    parser.add_argument('--v5_results', type=str, default='results/delta_opt_v5/results_50.0deg.pkl')
     parser.add_argument('--results_dir', type=str, default='results/perturbation_delta_vs_random')
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
@@ -65,14 +68,23 @@ def main():
 
     # Load deltas
     deltas = {}
-    for label, path in [('v1', args.v1_results), ('v2', args.v2_results)]:
-        if args.which in (label, 'both') and os.path.exists(path):
+    all_versions = [('v1', args.v1_results), ('v2', args.v2_results),
+                    ('v3b', args.v3b_results), ('v4', args.v4_results),
+                    ('v5', args.v5_results)]
+    for label, path in all_versions:
+        if args.which in (label, 'both', 'all') and os.path.exists(path):
             with open(path, 'rb') as f:
                 results = pickle.load(f)
-            delta = results['delta']
-            delta_unit = delta / delta.norm()
+            # v4 stores 'direction' (unit vec), others store 'delta'
+            if 'direction' in results:
+                delta_unit = results['direction']
+                delta_unit = delta_unit / delta_unit.norm()
+                print(f"Loaded {label}: unit direction (v4 spherical)")
+            else:
+                delta = results['delta']
+                delta_unit = delta / delta.norm()
+                print(f"Loaded {label}: original norm={delta.norm().item():.1f}")
             deltas[label] = delta_unit
-            print(f"Loaded {label}: original norm={delta.norm().item():.1f}")
 
     # Load model
     print(f"\nLoading model: {args.model}")

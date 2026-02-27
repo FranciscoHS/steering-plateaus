@@ -26,7 +26,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from src.model import load_model, forward_from_layer
+from src.model import load_model, forward_from_layer_to_final, _get_final_norm, _get_lm_head
 
 LAYER = 14
 MODEL_NAME = 'qwen3-0.6b'
@@ -42,6 +42,9 @@ PERT_MAX_DEG = 50.0
 
 # KL thresholds for plateau width
 KL_THRESHOLDS = [0.1, 0.2, 0.5]
+
+# L2 plateau: fraction of off-manifold linear baseline
+L2_RATIO_THRESHOLDS = [0.5, 0.8]
 
 SEED = 42
 
@@ -108,24 +111,16 @@ def spherical_rotate(activation, direction, angle_rad):
     return R * (np.cos(angle_rad) * a_unit + np.sin(angle_rad) * v_perp)
 
 
-def compute_kl_divs(model, context, activation, directions, pert_angles_rad,
+def compute_metrics(model, context, activation, directions, pert_angles_rad,
                     layer, device):
-    """Compute KL divergences for perturbations along multiple directions.
+    """Compute KL divergences and L2 distances for perturbations.
 
     Perturbation: a_perturbed = cos(θ) * a + sin(θ) * ||a|| * v
     where v is a raw unit vector (NOT orthogonalized to a).
 
-    Args:
-        model: language model
-        context: [1, seq_len-1, d_model] prefix residual stream
-        activation: [d_model] steered activation (reference point)
-        directions: [n_dirs, d_model] perturbation directions (unit vectors)
-        pert_angles_rad: [n_angles] perturbation angles
-        layer: starting layer for forward pass
-        device: torch device
-
     Returns:
         kl_divs: [n_angles, n_dirs]
+        l2_dists: [n_angles, n_dirs] — L2 on final-layer activations (before ln_f)
     """
     model_dtype = next(model.parameters()).dtype
     n_dirs = directions.shape[0]
@@ -136,12 +131,15 @@ def compute_kl_divs(model, context, activation, directions, pert_angles_rad,
     R = a.norm()
     dirs = directions.to(device=device, dtype=model_dtype)
 
-    # Reference logits
+    # Reference: final-layer activations + logits
     with torch.no_grad():
-        ref_logits = forward_from_layer(model, ctx, a.unsqueeze(0).unsqueeze(0), layer)
+        ref_final = forward_from_layer_to_final(model, ctx, a.unsqueeze(0).unsqueeze(0), layer)
+        ref_ln = _get_final_norm(model)(ref_final.unsqueeze(1)).squeeze(1)
+        ref_logits = _get_lm_head(model)(ref_ln)
         ref_log_probs = F.log_softmax(ref_logits.float(), dim=-1)
 
     kl_divs = np.zeros((n_angles, n_dirs))
+    l2_dists = np.zeros((n_angles, n_dirs))
 
     for ang_idx, theta in enumerate(pert_angles_rad):
         cos_t = np.cos(theta)
@@ -150,28 +148,35 @@ def compute_kl_divs(model, context, activation, directions, pert_angles_rad,
         perturbed = perturbed.unsqueeze(1)  # [n_dirs, 1, d]
 
         with torch.no_grad():
-            pert_logits = forward_from_layer(model, ctx, perturbed, layer)
+            pert_final = forward_from_layer_to_final(model, ctx, perturbed, layer)
+
+            # L2 on final-layer activations
+            l2_dists[ang_idx] = (pert_final - ref_final).float().norm(dim=-1).cpu().numpy()
+
+            # KL on logits
+            pert_ln = _get_final_norm(model)(pert_final.unsqueeze(1)).squeeze(1)
+            pert_logits = _get_lm_head(model)(pert_ln)
             pert_log_probs = F.log_softmax(pert_logits.float(), dim=-1)
             ref_probs = ref_log_probs.exp()
             kl = (ref_probs * (ref_log_probs - pert_log_probs)).sum(dim=-1)
             kl_divs[ang_idx] = kl.cpu().numpy()
 
-    return kl_divs
+    return kl_divs, l2_dists
 
 
-def compute_plateau_width(pert_angles_deg, kl_medians, threshold):
-    """Find the angle where median KL crosses the threshold via interpolation.
+def compute_plateau_width(pert_angles_deg, medians, threshold):
+    """Find the angle where median crosses the threshold via interpolation.
 
-    Returns max angle if KL never crosses, 0 if already above at first angle.
+    Returns max angle if never crosses, 0 if already above at first angle.
     """
-    above = np.where(kl_medians > threshold)[0]
+    above = np.where(medians > threshold)[0]
     if len(above) == 0:
         return pert_angles_deg[-1]
     first_above = above[0]
     if first_above == 0:
         return 0.0
     x0, x1 = pert_angles_deg[first_above - 1], pert_angles_deg[first_above]
-    y0, y1 = kl_medians[first_above - 1], kl_medians[first_above]
+    y0, y1 = medians[first_above - 1], medians[first_above]
     return x0 + (threshold - y0) * (x1 - x0) / (y1 - y0)
 
 
@@ -236,6 +241,7 @@ def main():
     n_dirs = all_dirs.shape[0]
 
     all_kl = np.zeros((n_steer, n_prompts, n_pert, n_dirs))
+    all_l2 = np.zeros((n_steer, n_prompts, n_pert, n_dirs))
 
     t0 = time.time()
 
@@ -249,20 +255,31 @@ def main():
             else:
                 steered = spherical_rotate(activations[p_idx], zh_dir, steer_rad)
 
-            kl_divs = compute_kl_divs(
+            kl_divs, l2_dists = compute_metrics(
                 model, contexts[p_idx], steered, all_dirs,
                 pert_angles_rad, LAYER, device
             )
             all_kl[s_idx, p_idx] = kl_divs
+            all_l2[s_idx, p_idx] = l2_dists
 
         elapsed = time.time() - t0
         print(f"  Done {n_prompts} prompts ({elapsed:.1f}s total)")
 
     print(f"\nTotal time: {time.time() - t0:.1f}s")
 
-    # Compute plateau widths for each threshold
-    # Store as {threshold: {'zh': array, 'random': array}}
-    plateau_widths = {}
+    # Off-manifold linear baseline for L2 (fit to highest steering, random dirs, 0-30°)
+    l2_max_steer = all_l2[-1]  # [n_prompts, n_pert, n_dirs]
+    l2_rand_max = l2_max_steer[:, :, 1:].transpose(0, 2, 1).reshape(-1, n_pert)
+    median_rand_max = np.median(l2_rand_max, axis=0)
+    fit_mask = pert_angles_deg <= 30
+    x_fit = pert_angles_deg[fit_mask]
+    y_fit = median_rand_max[fit_mask]
+    slope_offmanifold = np.sum(x_fit * y_fit) / np.sum(x_fit ** 2)
+    print(f"\nOff-manifold linear fit: slope={slope_offmanifold:.2f} L2/deg "
+          f"(from steer {STEER_ANGLES_DEG[-1]}°, random dirs, 0–30°)")
+
+    # KL plateau widths
+    plateau_widths_kl = {}
     for thresh in KL_THRESHOLDS:
         pw_zh = np.zeros(n_steer)
         pw_rand = np.zeros(n_steer)
@@ -276,7 +293,31 @@ def main():
             pw_rand[s_idx] = compute_plateau_width(pert_angles_deg, median_rand, thresh)
             print(f"  {steer_deg:3.0f}°: zh={pw_zh[s_idx]:.1f}°, random={pw_rand[s_idx]:.1f}°")
 
-        plateau_widths[thresh] = {'zh': pw_zh, 'random': pw_rand}
+        plateau_widths_kl[thresh] = {'zh': pw_zh, 'random': pw_rand}
+
+    # L2 plateau widths (fraction of linear baseline)
+    baseline_l2 = slope_offmanifold * pert_angles_deg  # expected L2 at each angle
+    plateau_widths_l2 = {}
+    for ratio_thresh in L2_RATIO_THRESHOLDS:
+        pw_zh = np.zeros(n_steer)
+        pw_rand = np.zeros(n_steer)
+
+        print(f"\nPlateau widths (L2 ratio threshold = {ratio_thresh}):")
+        for s_idx, steer_deg in enumerate(STEER_ANGLES_DEG):
+            l2 = all_l2[s_idx]  # [n_prompts, n_pert, n_dirs]
+
+            # Compute ratio: actual_L2 / baseline_L2 for each angle
+            median_zh = np.median(l2[:, :, 0], axis=0)
+            ratio_zh = median_zh / baseline_l2
+            pw_zh[s_idx] = compute_plateau_width(pert_angles_deg, ratio_zh, ratio_thresh)
+
+            median_rand = np.median(l2[:, :, 1:], axis=(0, 2))
+            ratio_rand = median_rand / baseline_l2
+            pw_rand[s_idx] = compute_plateau_width(pert_angles_deg, ratio_rand, ratio_thresh)
+
+            print(f"  {steer_deg:3.0f}°: zh={pw_zh[s_idx]:.1f}°, random={pw_rand[s_idx]:.1f}°")
+
+        plateau_widths_l2[ratio_thresh] = {'zh': pw_zh, 'random': pw_rand}
 
     # Save results
     results = {
@@ -287,11 +328,15 @@ def main():
             'pert_angles_deg': pert_angles_deg,
             'n_random_dirs': N_RANDOM_DIRS,
             'kl_thresholds': KL_THRESHOLDS,
+            'l2_ratio_thresholds': L2_RATIO_THRESHOLDS,
+            'slope_offmanifold': slope_offmanifold,
             'seed': SEED,
             'n_prompts': len(PROMPTS),
         },
         'kl_divs': all_kl,
-        'plateau_widths': plateau_widths,
+        'l2_dists': all_l2,
+        'plateau_widths_kl': plateau_widths_kl,
+        'plateau_widths_l2': plateau_widths_l2,
         'prompts': PROMPTS,
     }
     pkl_path = os.path.join(results_dir, 'results.pkl')
@@ -299,13 +344,13 @@ def main():
         pickle.dump(results, f)
     print(f"\nSaved: {pkl_path}")
 
-    # Plot 1: Plateau width vs steering magnitude — one panel per threshold
+    # Plot 1a: KL plateau width vs steering magnitude
     n_thresh = len(KL_THRESHOLDS)
     fig, axes = plt.subplots(1, n_thresh, figsize=(6 * n_thresh, 5))
     if n_thresh == 1:
         axes = [axes]
     for ax, thresh in zip(axes, KL_THRESHOLDS):
-        pw = plateau_widths[thresh]
+        pw = plateau_widths_kl[thresh]
         ax.plot(STEER_ANGLES_DEG, pw['zh'], 's-', color='red', linewidth=2,
                 markersize=5, label='zh direction')
         ax.plot(STEER_ANGLES_DEG, pw['random'], '^-', color='blue', linewidth=2,
@@ -318,8 +363,36 @@ def main():
         ax.set_xlim(-1, STEER_ANGLES_DEG[-1] + 1)
         ax.set_ylim(bottom=0)
 
-    fig.suptitle(f'Plateau width vs steering magnitude — {MODEL_NAME}, layer {LAYER}', fontsize=13)
-    plot_path = os.path.join(results_dir, 'plateau_width_vs_steering.png')
+    fig.suptitle(f'KL plateau width vs steering — {MODEL_NAME}, layer {LAYER}', fontsize=13)
+    plot_path = os.path.join(results_dir, 'plateau_width_vs_steering_kl.png')
+    plt.tight_layout()
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved: {plot_path}")
+
+    # Plot 1b: L2 plateau width vs steering magnitude
+    n_l2_thresh = len(L2_RATIO_THRESHOLDS)
+    fig, axes = plt.subplots(1, n_l2_thresh, figsize=(6 * n_l2_thresh, 5))
+    if n_l2_thresh == 1:
+        axes = [axes]
+    for ax, ratio_thresh in zip(axes, L2_RATIO_THRESHOLDS):
+        pw = plateau_widths_l2[ratio_thresh]
+        ax.plot(STEER_ANGLES_DEG, pw['zh'], 's-', color='red', linewidth=2,
+                markersize=5, label='zh direction')
+        ax.plot(STEER_ANGLES_DEG, pw['random'], '^-', color='blue', linewidth=2,
+                markersize=5, label='Random directions')
+        ax.set_xlabel('Steering angle toward zh (degrees)')
+        ax.set_ylabel('Plateau width (degrees)')
+        ax.set_title(f'L2/baseline ratio = {ratio_thresh}')
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(-1, STEER_ANGLES_DEG[-1] + 1)
+        ax.set_ylim(bottom=0)
+
+    fig.suptitle(f'L2 plateau width vs steering — {MODEL_NAME}, layer {LAYER}\n'
+                 f'(baseline: slope={slope_offmanifold:.1f} L2/deg from steer {STEER_ANGLES_DEG[-1]}°)',
+                 fontsize=13)
+    plot_path = os.path.join(results_dir, 'plateau_width_vs_steering_l2.png')
     plt.tight_layout()
     plt.savefig(plot_path, dpi=150, bbox_inches='tight')
     plt.close()
@@ -363,6 +436,48 @@ def main():
     plt.savefig(curves_path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"Saved: {curves_path}")
+
+    # Plot 3: L2 curves at selected steering magnitudes, with off-manifold linear baseline
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+    for ax, s_idx in zip(axes, steer_indices):
+        steer_deg = STEER_ANGLES_DEG[s_idx]
+        l2 = all_l2[s_idx]
+
+        # zh direction
+        median_zh = np.median(l2[:, :, 0], axis=0)
+        q25_zh = np.percentile(l2[:, :, 0], 25, axis=0)
+        q75_zh = np.percentile(l2[:, :, 0], 75, axis=0)
+        ax.plot(pert_angles_deg, median_zh, 'r-', linewidth=2, label='zh')
+        ax.fill_between(pert_angles_deg, q25_zh, q75_zh, color='red', alpha=0.15)
+
+        # Random directions
+        l2_rand = l2[:, :, 1:].transpose(0, 2, 1).reshape(-1, n_pert)
+        median_rand = np.median(l2_rand, axis=0)
+        q25_rand = np.percentile(l2_rand, 25, axis=0)
+        q75_rand = np.percentile(l2_rand, 75, axis=0)
+        ax.plot(pert_angles_deg, median_rand, 'b-', linewidth=2, label='Random')
+        ax.fill_between(pert_angles_deg, q25_rand, q75_rand, color='blue', alpha=0.15)
+
+        # Off-manifold linear baseline
+        ax.plot(pert_angles_deg, slope_offmanifold * pert_angles_deg,
+                'k--', linewidth=1.5, alpha=0.5,
+                label=f'Linear baseline (steer {STEER_ANGLES_DEG[-1]}°)')
+
+        ax.set_xlabel('Perturbation angle (deg)')
+        ax.set_ylabel('L2 distance (final layer)')
+        ax.set_title(f'Steer {steer_deg:.0f}°')
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(0, PERT_MAX_DEG)
+        ax.set_ylim(bottom=0)
+
+    fig.suptitle(f'L2 distance at different steering magnitudes — {MODEL_NAME}, layer {LAYER}', fontsize=12)
+    plt.tight_layout()
+    l2_path = os.path.join(results_dir, 'l2_curves_by_steering.png')
+    plt.savefig(l2_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved: {l2_path}")
 
     print("\nDone!")
 

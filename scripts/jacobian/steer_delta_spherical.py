@@ -77,7 +77,8 @@ def spherical_steer_next_token(model, tokenizer, input_ids, steer_direction,
 
 
 def generate_with_spherical_steering(model, tokenizer, input_ids, steer_direction,
-                                      angle_deg, steer_layer, device, n_tokens=30):
+                                      angle_deg, steer_layer, device, n_tokens=30,
+                                      temperature=1.0):
     """
     Generate tokens with spherical steering at each step.
     Steers only the last token position. No KV cache.
@@ -112,7 +113,14 @@ def generate_with_spherical_steering(model, tokenizer, input_ids, steer_directio
 
         handle.remove()
 
-        next_id = outputs.logits[0, -1, :].argmax().item()
+        logits = outputs.logits[0, -1, :]
+        if temperature > 0 and temperature != 1.0:
+            logits = logits / temperature
+        if temperature > 0:
+            probs = torch.softmax(logits, dim=-1)
+            next_id = torch.multinomial(probs, 1).item()
+        else:
+            next_id = logits.argmax().item()
         generated_ids.append(next_id)
 
         if next_id == tokenizer.eos_token_id:
@@ -136,12 +144,16 @@ def main():
                         default=','.join(str(i) for i in range(0, 65, 5)),
                         help='Comma-separated angles in degrees')
     parser.add_argument('--n_tokens', type=int, default=30)
+    parser.add_argument('--temperature', type=float, default=0.0,
+                        help='Sampling temperature (0 = greedy)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Seed for FineWeb loading (42 = same prompts as optimization)')
     parser.add_argument('--v1_results', type=str, default='results/delta_opt/results_r66.pkl')
     parser.add_argument('--v2_results', type=str, default='results/delta_opt_v2/results_r66.pkl')
+    parser.add_argument('--v4_results', type=str, default='results/delta_opt_v4/results_50.0deg.pkl')
+    parser.add_argument('--v5_results', type=str, default='results/delta_opt_v5/results_50.0deg.pkl')
     parser.add_argument('--which', type=str, default='both',
-                        choices=['v1', 'v2', 'both'])
+                        choices=['v1', 'v2', 'v4', 'v5', 'both', 'all'])
     parser.add_argument('--negate', action='store_true',
                         help='Negate the delta direction (steer in opposite direction)')
     parser.add_argument('--mode', type=str, default='predictions',
@@ -155,17 +167,23 @@ def main():
 
     # Load deltas and normalize to unit vectors
     deltas = {}
-    for label, path in [('v1', args.v1_results), ('v2', args.v2_results)]:
-        if args.which in (label, 'both') and os.path.exists(path):
+    all_versions = [('v1', args.v1_results), ('v2', args.v2_results),
+                    ('v4', args.v4_results), ('v5', args.v5_results)]
+    for label, path in all_versions:
+        if args.which in (label, 'both', 'all') and os.path.exists(path):
             with open(path, 'rb') as f:
                 results = pickle.load(f)
-            delta = results['delta']
-            delta_unit = delta / delta.norm()
+            if 'direction' in results:
+                delta_unit = results['direction']
+                delta_unit = delta_unit / delta_unit.norm()
+            else:
+                delta = results['delta']
+                delta_unit = delta / delta.norm()
             if args.negate:
                 delta_unit = -delta_unit
             deltas[label] = delta_unit
             sign_str = " (NEGATED)" if args.negate else ""
-            print(f"Loaded {label}: original norm={delta.norm().item():.1f}{sign_str}")
+            print(f"Loaded {label}{sign_str}")
 
     # Load model
     print(f"\nLoading model: {args.model}")
@@ -224,8 +242,7 @@ def main():
 
         # --- Generation mode ---
         if args.mode in ('generate', 'both'):
-            # Generate at a subset of angles for readability
-            gen_angles = [0, 10, 20, 30, 45, 60] if len(angles) > 6 else angles
+            gen_angles = angles
             print(f"\n--- Generation (angles: {gen_angles}) ---")
             for i in range(args.n_prompts):
                 input_ids = opt_sequences[i].unsqueeze(0)
@@ -235,9 +252,10 @@ def main():
                 for angle in gen_angles:
                     text, ids = generate_with_spherical_steering(
                         model, tokenizer, input_ids, delta_unit, angle,
-                        args.layer, device, n_tokens=args.n_tokens
+                        args.layer, device, n_tokens=args.n_tokens,
+                        temperature=args.temperature
                     )
-                    print(f"  {angle:5.1f}°: {repr(text[:100])}")
+                    print(f"  {angle:5.1f}°: {repr(text)}")
 
         all_results[label] = dir_results
 

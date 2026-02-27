@@ -15,6 +15,32 @@ I am Francisco, a researcher with a PhD in Quantum Info who is now working on me
 
 This project investigates what distinguishes real activations (arising from actual inputs) from arbitrary points in activation space in language models. We want to characterize the geometric properties of real activations, random activations, and boundary points (identified during interpolation between real activations).
 
+## Error Correction and Plateaus — Conceptual Primer
+
+**This is essential context for understanding the project. Read carefully.**
+
+When we perturb a real activation on the sphere (fixed norm) and measure the downstream response (L2 distance at final layer, or KL divergence on logits), we observe a **plateau**: small perturbations produce near-zero response, then at some angle the response sharply increases.
+
+The plateau is a robust empirical observation, replicated across many models (GPT-2, Qwen, ChessGPT, CSP) and layers.
+
+The **error correction hypothesis** is one proposed explanation (not established fact): the model's downstream layers have learned to be robust to noise in the residual stream. Small perturbations get "corrected" — mapped back to approximately the right output.
+
+The key question is: how does the plateau depend on the **direction** of perturbation?
+
+**Feature directions are sensitive directions.** A feature direction (e.g., "knight on e5" in a chess model) is a direction along which the model's computation is meaningfully affected. Perturbing along a feature direction changes what the model "thinks" about the input, so it produces a large downstream response — it **breaks the plateau** at small angles.
+
+**Random directions spread energy across many features.** In high dimensions, a random direction has small components along every feature direction. Each feature gets perturbed by only ~1/√d of the total perturbation magnitude. Since each per-feature perturbation is tiny, the error correction handles all of them → the plateau is **long** for random directions.
+
+**Combining K feature directions dilutes per-feature energy.** If you perturb along normalize(d1 + d2 + ... + dk) at a fixed angle θ, the perturbation energy is split across K features, each getting ~1/√K of the total. Error correction predicts:
+- 1 feature: all energy in one sensitive direction → **shortest plateau**
+- 2 features: energy split → each gets less → **longer plateau**
+- K features: energy spread more → **even longer**
+- Random (all features): maximally spread → **longest plateau**
+
+The predicted ordering of plateau length is: **1 feature < 2 features < ... < K features < random**.
+
+**If error correction is the right explanation AND the probes are the model's true features**, this ordering must hold. If it doesn't, either (a) error correction is wrong, or (b) the probes are not the model's true computational features.
+
 ## Existing Code
 
 Look at these files for existing infrastructure and patterns:
@@ -137,11 +163,18 @@ Uses Stefan Heimersheim's fork: https://github.com/Stefan-Heimersheim/runpod_cli
 ### Usage
 
 ```bash
-rpc create --gpu_type "RTX 4090" --runtime 60   # Create pod (60 min)
-rpc list                                         # List active pods
-rpc terminate                                    # Terminate pod (no id needed if only one)
-ssh runpod                                       # SSH to pod
+# Named pods (recommended — required for parallel agents)
+rpc create --name chess-exp --gpu_type "RTX 4090" --runtime 600
+ssh runpod-chess-exp                              # SSH alias is runpod-<name>
+rpc terminate --name=chess-exp                    # Terminate by name, cleans up SSH config
+
+# Unnamed pods (single-agent backward compat)
+rpc create --gpu_type "RTX 4090" --runtime 600    # SSH alias is just "runpod"
+ssh runpod
+rpc terminate --pod_id=abc123
 ```
+
+**IMPORTANT for parallel agents:** Always use `--name` when creating pods. Each named pod gets its own SSH alias (`runpod-<name>`) so multiple agents can create and use pods simultaneously without clobbering each other's SSH config. Without `--name`, all pods share the single `runpod` alias and the last one wins.
 
 **Note:** GPU availability varies. If one type fails, try others: `RTX 4090`, `RTX 4000 Ada`, `RTX A4000`, `A100 80GB`. The CLI will error with "no instances available" if unavailable.
 
@@ -163,21 +196,20 @@ Then update `~/.ssh/config.runpod_cli` with the correct HostName and Port.
 
 ### Sync workflow
 
-**Important:** The `sync_to_runpod.sh` script may not work reliably. Use manual rsync instead:
+**Important:** The `sync_to_runpod.sh` script may not work reliably. Use `scp` instead (rsync is not installed on RunPod pods):
 
 ```bash
-# Sync code TO RunPod (from project root)
-rsync -avz --exclude 'results/' --exclude '.git' --exclude '__pycache__' \
-    ./ runpod:/workspace/steering-plateaus/
+# Sync code TO RunPod (from project root) — replace ALIAS with your pod's SSH alias
+scp -r src/ scripts/ requirements.txt ALIAS:/workspace/steering-plateaus/
 
 # Sync results FROM RunPod
-rsync -avz runpod:/workspace/steering-plateaus/results/ ./results/
+scp -r ALIAS:/workspace/steering-plateaus/results/ ./results/
 
 # Run experiment on RunPod
-ssh runpod "cd /workspace/steering-plateaus && python scripts/your_script.py"
+ssh ALIAS "cd /workspace/steering-plateaus && python scripts/your_script.py"
 ```
 
-The SSH host is always `runpod` (configured automatically by `rpc create`).
+The SSH alias is `runpod-<name>` if you used `--name`, or just `runpod` if you didn't.
 
 **Checkpointing:** Build in automatic checkpointing for long runs (spot interruptions)
 
