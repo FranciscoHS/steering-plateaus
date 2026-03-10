@@ -23,13 +23,16 @@ from scripts.perturbation.sweep_random_points import (
 )
 
 
-def load_gemma_scope_sae(layer, width='16k', device='cpu'):
+def load_gemma_scope_sae(layer, width='16k', device='cpu', model_size='2b'):
     """Load a Gemma Scope SAE for a given layer.
+
+    Args:
+        model_size: '2b' or '9b' (Gemma 2 variant)
 
     Returns the SAE object with .encode() and .W_dec attributes.
     """
     from sae_lens import SAE
-    release = "gemma-scope-2b-pt-res-canonical"
+    release = f"gemma-scope-{model_size}-pt-res-canonical"
     sae_id = f"layer_{layer}/width_{width}/canonical"
     print(f"Loading SAE: {release} / {sae_id}")
     sae, cfg_dict, sparsity = SAE.from_pretrained(

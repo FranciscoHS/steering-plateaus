@@ -99,10 +99,12 @@ def run_spherical_sweep(model, context, activation, v_perps, angles_rad,
     Returns:
         l2_dists: [n_angles, n_dirs]
         kl_divs: [n_angles, n_dirs]
+        cos_dists: [n_angles, n_dirs]
     """
     n_angles = len(angles_rad)
     l2_dists = np.zeros((n_angles, n_dirs))
     kl_divs = np.zeros((n_angles, n_dirs))
+    cos_dists = np.zeros((n_angles, n_dirs))
 
     model_dtype = next(model.parameters()).dtype
     ctx = context.unsqueeze(0).to(device=device, dtype=model_dtype)
@@ -140,6 +142,8 @@ def run_spherical_sweep(model, context, activation, v_perps, angles_rad,
             else:
                 pert_measure = pert_final
             l2_dists[ang_idx] = (pert_measure - ref_measure).float().norm(dim=-1).cpu().numpy()
+            cos_sim = F.cosine_similarity(pert_measure.float(), ref_measure.float(), dim=-1)
+            cos_dists[ang_idx] = (1 - cos_sim).cpu().numpy()
 
             # KL always from final logits
             pert_ln = _get_final_norm(model)(pert_final.unsqueeze(1)).squeeze(1)
@@ -149,7 +153,7 @@ def run_spherical_sweep(model, context, activation, v_perps, angles_rad,
             kl = (ref_probs * (ref_log_probs - pert_log_probs)).sum(dim=-1)
             kl_divs[ang_idx] = kl.cpu().numpy()
 
-    return l2_dists, kl_divs
+    return l2_dists, kl_divs, cos_dists
 
 
 def main():
@@ -174,6 +178,11 @@ def main():
                         help='Data source: fineweb, random tokens, python_code, chess, or auto')
     parser.add_argument('--results_dir', type=str, default=None)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--dtype', type=str, default=None,
+                        choices=['float32', 'bfloat16', 'float16'],
+                        help='Model dtype (default: model.py default)')
+    parser.add_argument('--max_angle', type=float, default=180,
+                        help='Maximum perturbation angle in degrees (default: 180)')
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -189,8 +198,8 @@ def main():
         args.results_dir = f'results/perturbation_sweep_spherical/{args.model}_{comparison_tag}'
     os.makedirs(args.results_dir, exist_ok=True)
 
-    # Angles: linearly spaced from just above 0 to 180 degrees
-    angles_deg = np.linspace(0, 180, args.n_angles + 1)[1:]  # skip 0
+    # Angles: linearly spaced from just above 0 to max_angle degrees
+    angles_deg = np.linspace(0, args.max_angle, args.n_angles + 1)[1:]  # skip 0
     angles_rad = np.deg2rad(angles_deg)
 
     measure_str = f", measure_layer={args.measure_layer}" if args.measure_layer is not None else ""
@@ -201,8 +210,10 @@ def main():
           + (f", delta={args.delta_path}" if args.delta_path else ""))
 
     # Load model
-    print(f"Loading model: {args.model}")
-    model, tokenizer, device = load_model(args.model)
+    dtype_map = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}
+    model_dtype = dtype_map[args.dtype] if args.dtype else None
+    print(f"Loading model: {args.model}" + (f" (dtype={args.dtype})" if args.dtype else ""))
+    model, tokenizer, device = load_model(args.model, dtype=model_dtype)
     d_model = model._plateau_info['d_model']
     n_layers = len(_get_blocks(model))
     # Resolve negative measure_layer (e.g. -2 → 2nd-to-last)
@@ -290,9 +301,10 @@ def main():
     print(f"\n=== Real activations ===")
     real_l2 = np.zeros((args.n_act, len(angles_deg), args.n_dirs))
     real_kl = np.zeros((args.n_act, len(angles_deg), args.n_dirs))
+    real_cos = np.zeros((args.n_act, len(angles_deg), args.n_dirs))
     t0 = time.time()
     for i in range(args.n_act):
-        real_l2[i], real_kl[i] = run_spherical_sweep(
+        real_l2[i], real_kl[i], real_cos[i] = run_spherical_sweep(
             model, contexts[i], activations[i], real_v_perps[i],
             angles_rad, args.layer, device, args.n_dirs,
             measure_layer=args.measure_layer
@@ -306,9 +318,10 @@ def main():
     print(f"\n=== Comparison activations ({comparison_tag}) ===")
     rand_l2 = np.zeros((args.n_act, len(angles_deg), args.n_dirs))
     rand_kl = np.zeros((args.n_act, len(angles_deg), args.n_dirs))
+    rand_cos = np.zeros((args.n_act, len(angles_deg), args.n_dirs))
     t0 = time.time()
     for i in range(args.n_act):
-        rand_l2[i], rand_kl[i] = run_spherical_sweep(
+        rand_l2[i], rand_kl[i], rand_cos[i] = run_spherical_sweep(
             model, contexts[i], comparison_activations[i], rand_v_perps[i],
             angles_rad, args.layer, device, args.n_dirs,
             measure_layer=args.measure_layer
@@ -326,8 +339,8 @@ def main():
         'act_norm_mean': act_norm_mean,
         'comparison_type': comparison_tag,
         'comparison_label': comparison_label,
-        'real': {'l2': real_l2, 'kl': real_kl},
-        'random': {'l2': rand_l2, 'kl': rand_kl},
+        'real': {'l2': real_l2, 'kl': real_kl, 'cos': real_cos},
+        'random': {'l2': rand_l2, 'kl': rand_kl, 'cos': rand_cos},
     }
     with open(os.path.join(args.results_dir, 'results.pkl'), 'wb') as f:
         pickle.dump(results, f)
@@ -342,8 +355,8 @@ def main():
     n_individual = 10
 
     for plot_type in ['median', 'individual']:
-        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-        for metric_idx, (key, name) in enumerate([('l2', 'L2 distance'), ('kl', 'KL divergence')]):
+        fig, axes = plt.subplots(1, 3, figsize=(20, 6))
+        for metric_idx, (key, name) in enumerate([('l2', 'L2 distance'), ('cos', 'Cosine distance'), ('kl', 'KL divergence')]):
             ax = axes[metric_idx]
             for (cond_key, label), color in zip(conditions, colors):
                 d = results[cond_key][key]
@@ -366,13 +379,13 @@ def main():
             ax.set_title(name)
             ax.legend()
             ax.grid(True, alpha=0.3)
-            ax.set_xlim(0, 180)
+            ax.set_xlim(0, args.max_angle)
 
             # Twin top axis: chord distance
             ax2 = ax.twiny()
             ax2.set_xlim(ax.get_xlim())
             # Place ticks at nice angle values, label with chord distance
-            tick_angles = [0, 30, 60, 90, 120, 150, 180]
+            tick_angles = [a for a in [0, 10, 20, 30, 40, 60, 90, 120, 150, 180] if a <= args.max_angle]
             tick_chords = [2 * act_norm_mean * np.sin(np.deg2rad(a) / 2) for a in tick_angles]
             ax2.set_xticks(tick_angles)
             ax2.set_xticklabels([f'{c:.0f}' for c in tick_chords])
