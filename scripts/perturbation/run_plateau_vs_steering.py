@@ -26,7 +26,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from src.model import load_model, forward_from_layer_to_final, _get_final_norm, _get_lm_head
+from src.model import load_model, forward_from_layer_to_final, forward_from_layer_to_layer, _get_final_norm, _get_lm_head, _get_blocks
 
 LAYER = 14
 MODEL_NAME = 'qwen3-0.6b'
@@ -37,14 +37,17 @@ STEER_ANGLES_DEG = np.arange(0, 65, 5)  # 0, 5, 10, ..., 60
 
 # Perturbation sweep
 N_RANDOM_DIRS = 10
-N_PERT_ANGLES = 25
-PERT_MAX_DEG = 50.0
+N_PERT_ANGLES = 45
+PERT_MAX_DEG = 90.0
 
 # KL thresholds for plateau width
 KL_THRESHOLDS = [0.1, 0.2, 0.5]
 
 # L2 plateau: fraction of off-manifold linear baseline
 L2_RATIO_THRESHOLDS = [0.5, 0.8]
+
+# Cosine distance thresholds for plateau width
+COSDIST_THRESHOLDS = [0.01, 0.05, 0.1]
 
 SEED = 42
 
@@ -112,8 +115,8 @@ def spherical_rotate(activation, direction, angle_rad):
 
 
 def compute_metrics(model, context, activation, directions, pert_angles_rad,
-                    layer, device):
-    """Compute KL divergences and L2 distances for perturbations.
+                    layer, device, measure_layer=None):
+    """Compute KL divergences, L2 distances, and cosine distances for perturbations.
 
     Perturbation: a_perturbed = cos(θ) * a + sin(θ) * ||a|| * v
     where v is a raw unit vector (NOT orthogonalized to a).
@@ -121,6 +124,7 @@ def compute_metrics(model, context, activation, directions, pert_angles_rad,
     Returns:
         kl_divs: [n_angles, n_dirs]
         l2_dists: [n_angles, n_dirs] — L2 on final-layer activations (before ln_f)
+        cos_dists: [n_angles, n_dirs] — cosine distance at measure_layer (or final)
     """
     model_dtype = next(model.parameters()).dtype
     n_dirs = directions.shape[0]
@@ -131,15 +135,21 @@ def compute_metrics(model, context, activation, directions, pert_angles_rad,
     R = a.norm()
     dirs = directions.to(device=device, dtype=model_dtype)
 
-    # Reference: final-layer activations + logits
+    # Reference: final-layer activations + logits + measure-layer activations
     with torch.no_grad():
         ref_final = forward_from_layer_to_final(model, ctx, a.unsqueeze(0).unsqueeze(0), layer)
         ref_ln = _get_final_norm(model)(ref_final.unsqueeze(1)).squeeze(1)
         ref_logits = _get_lm_head(model)(ref_ln)
         ref_log_probs = F.log_softmax(ref_logits.float(), dim=-1)
+        if measure_layer is not None:
+            ref_measure = forward_from_layer_to_layer(
+                model, ctx, a.unsqueeze(0).unsqueeze(0), layer, measure_layer).float()
+        else:
+            ref_measure = ref_final.float()
 
     kl_divs = np.zeros((n_angles, n_dirs))
     l2_dists = np.zeros((n_angles, n_dirs))
+    cos_dists = np.zeros((n_angles, n_dirs))
 
     for ang_idx, theta in enumerate(pert_angles_rad):
         cos_t = np.cos(theta)
@@ -161,7 +171,16 @@ def compute_metrics(model, context, activation, directions, pert_angles_rad,
             kl = (ref_probs * (ref_log_probs - pert_log_probs)).sum(dim=-1)
             kl_divs[ang_idx] = kl.cpu().numpy()
 
-    return kl_divs, l2_dists
+            # Cosine distance at measure_layer
+            if measure_layer is not None:
+                pert_measure = forward_from_layer_to_layer(
+                    model, ctx, perturbed, layer, measure_layer).float()
+            else:
+                pert_measure = pert_final.float()
+            cos_dists[ang_idx] = (1.0 - F.cosine_similarity(
+                ref_measure, pert_measure, dim=-1)).cpu().numpy()
+
+    return kl_divs, l2_dists, cos_dists
 
 
 def compute_plateau_width(pert_angles_deg, medians, threshold):
@@ -202,7 +221,10 @@ def main():
     print(f"\nLoading model: {MODEL_NAME}")
     model, tokenizer, device = load_model(MODEL_NAME)
     d_model = model._plateau_info['d_model']
-    print(f"Device: {device}, d_model: {d_model}")
+    n_layers = len(_get_blocks(model))
+    measure_layer = n_layers - 2  # 2nd-to-last
+    print(f"Device: {device}, d_model: {d_model}, n_layers: {n_layers}, "
+          f"cosine distance measured at layer {measure_layer}")
 
     # Load zh direction
     print(f"Loading zh direction from {DIRECTIONS_PATH}")
@@ -242,6 +264,7 @@ def main():
 
     all_kl = np.zeros((n_steer, n_prompts, n_pert, n_dirs))
     all_l2 = np.zeros((n_steer, n_prompts, n_pert, n_dirs))
+    all_cd = np.zeros((n_steer, n_prompts, n_pert, n_dirs))
 
     t0 = time.time()
 
@@ -255,12 +278,13 @@ def main():
             else:
                 steered = spherical_rotate(activations[p_idx], zh_dir, steer_rad)
 
-            kl_divs, l2_dists = compute_metrics(
+            kl_divs, l2_dists, cos_dists = compute_metrics(
                 model, contexts[p_idx], steered, all_dirs,
-                pert_angles_rad, LAYER, device
+                pert_angles_rad, LAYER, device, measure_layer=measure_layer
             )
             all_kl[s_idx, p_idx] = kl_divs
             all_l2[s_idx, p_idx] = l2_dists
+            all_cd[s_idx, p_idx] = cos_dists
 
         elapsed = time.time() - t0
         print(f"  Done {n_prompts} prompts ({elapsed:.1f}s total)")
@@ -319,24 +343,45 @@ def main():
 
         plateau_widths_l2[ratio_thresh] = {'zh': pw_zh, 'random': pw_rand}
 
+    # Cosine distance plateau widths
+    plateau_widths_cd = {}
+    for thresh in COSDIST_THRESHOLDS:
+        pw_zh = np.zeros(n_steer)
+        pw_rand = np.zeros(n_steer)
+
+        print(f"\nPlateau widths (cosine distance threshold = {thresh}):")
+        for s_idx, steer_deg in enumerate(STEER_ANGLES_DEG):
+            cd = all_cd[s_idx]  # [n_prompts, n_pert, n_dirs]
+            median_zh = np.median(cd[:, :, 0], axis=0)
+            pw_zh[s_idx] = compute_plateau_width(pert_angles_deg, median_zh, thresh)
+            median_rand = np.median(cd[:, :, 1:], axis=(0, 2))
+            pw_rand[s_idx] = compute_plateau_width(pert_angles_deg, median_rand, thresh)
+            print(f"  {steer_deg:3.0f}°: zh={pw_zh[s_idx]:.1f}°, random={pw_rand[s_idx]:.1f}°")
+
+        plateau_widths_cd[thresh] = {'zh': pw_zh, 'random': pw_rand}
+
     # Save results
     results = {
         'config': {
             'model': MODEL_NAME,
             'layer': LAYER,
+            'measure_layer': measure_layer,
             'steer_angles_deg': STEER_ANGLES_DEG,
             'pert_angles_deg': pert_angles_deg,
             'n_random_dirs': N_RANDOM_DIRS,
             'kl_thresholds': KL_THRESHOLDS,
             'l2_ratio_thresholds': L2_RATIO_THRESHOLDS,
+            'cosdist_thresholds': COSDIST_THRESHOLDS,
             'slope_offmanifold': slope_offmanifold,
             'seed': SEED,
             'n_prompts': len(PROMPTS),
         },
         'kl_divs': all_kl,
         'l2_dists': all_l2,
+        'cos_dists': all_cd,
         'plateau_widths_kl': plateau_widths_kl,
         'plateau_widths_l2': plateau_widths_l2,
+        'plateau_widths_cd': plateau_widths_cd,
         'prompts': PROMPTS,
     }
     pkl_path = os.path.join(results_dir, 'results.pkl')
@@ -478,6 +523,72 @@ def main():
     plt.savefig(l2_path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"Saved: {l2_path}")
+
+    # Plot 4: Cosine distance plateau width vs steering magnitude
+    n_cd_thresh = len(COSDIST_THRESHOLDS)
+    fig, axes = plt.subplots(1, n_cd_thresh, figsize=(6 * n_cd_thresh, 5))
+    if n_cd_thresh == 1:
+        axes = [axes]
+    for ax, thresh in zip(axes, COSDIST_THRESHOLDS):
+        pw = plateau_widths_cd[thresh]
+        ax.plot(STEER_ANGLES_DEG, pw['zh'], 's-', color='red', linewidth=2,
+                markersize=5, label='zh direction')
+        ax.plot(STEER_ANGLES_DEG, pw['random'], '^-', color='blue', linewidth=2,
+                markersize=5, label='Random directions')
+        ax.set_xlabel('Steering angle toward zh (degrees)')
+        ax.set_ylabel('Plateau width (degrees)')
+        ax.set_title(f'Cosine dist threshold = {thresh}')
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(-1, STEER_ANGLES_DEG[-1] + 1)
+        ax.set_ylim(bottom=0)
+
+    fig.suptitle(f'Cosine distance plateau width vs steering — {MODEL_NAME}, '
+                 f'layer {LAYER}, measured at layer {measure_layer}', fontsize=13)
+    plot_path = os.path.join(results_dir, 'plateau_width_vs_steering_cosdist.png')
+    plt.tight_layout()
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved: {plot_path}")
+
+    # Plot 5: Cosine distance curves at selected steering magnitudes
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+    for ax, s_idx in zip(axes, steer_indices):
+        steer_deg = STEER_ANGLES_DEG[s_idx]
+        cd = all_cd[s_idx]
+
+        # zh direction
+        median_zh = np.median(cd[:, :, 0], axis=0)
+        q25_zh = np.percentile(cd[:, :, 0], 25, axis=0)
+        q75_zh = np.percentile(cd[:, :, 0], 75, axis=0)
+        ax.plot(pert_angles_deg, median_zh, 'r-', linewidth=2, label='zh')
+        ax.fill_between(pert_angles_deg, q25_zh, q75_zh, color='red', alpha=0.15)
+
+        # Random directions
+        cd_rand = cd[:, :, 1:].transpose(0, 2, 1).reshape(-1, n_pert)
+        median_rand = np.median(cd_rand, axis=0)
+        q25_rand = np.percentile(cd_rand, 25, axis=0)
+        q75_rand = np.percentile(cd_rand, 75, axis=0)
+        ax.plot(pert_angles_deg, median_rand, 'b-', linewidth=2, label='Random')
+        ax.fill_between(pert_angles_deg, q25_rand, q75_rand, color='blue', alpha=0.15)
+
+        for thresh in COSDIST_THRESHOLDS:
+            ax.axhline(thresh, color='gray', linestyle=':', alpha=0.5)
+        ax.set_xlabel('Perturbation angle (deg)')
+        ax.set_ylabel(f'Cosine distance (layer {measure_layer})')
+        ax.set_title(f'Steer {steer_deg:.0f}°')
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(0, PERT_MAX_DEG)
+
+    fig.suptitle(f'Cosine distance at different steering magnitudes — {MODEL_NAME}, '
+                 f'layer {LAYER}, measured at layer {measure_layer}', fontsize=12)
+    plt.tight_layout()
+    cd_path = os.path.join(results_dir, 'cosdist_curves_by_steering.png')
+    plt.savefig(cd_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved: {cd_path}")
 
     print("\nDone!")
 

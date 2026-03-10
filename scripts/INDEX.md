@@ -5,6 +5,8 @@ Quick reference: "I want to do X — which script do I run?"
 ## Perturbation sweeps & plateau characterization
 - **Run a perturbation sweep:** `perturbation/run_perturbation_sweep_spherical.py` (spherical, go-to version) or `perturbation/run_perturbation_sweep_linear.py` (linear)
 - **Analyze plateau structure:** `perturbation/run_plateau_analysis.py`
+- **Real vs random points sweep (any model):** `perturbation/sweep_random_points.py`
+- **Real vs random points sweep (chess only):** `perturbation/sweep_random_points_chess.py`
 - **Run Gemma sweeps:** `perturbation/run_gemma_sweeps.sh`
 
 ## Jacobian analysis

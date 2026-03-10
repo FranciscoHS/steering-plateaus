@@ -11,6 +11,10 @@ I am Francisco, a researcher with a PhD in Quantum Info who is now working on me
 
 **Attribution:** When discussing ideas, be careful to attribute them correctly. Don't present Francisco's or Stefan's ideas back as if they were Claude's own suggestions. It's fine to echo and evaluate ideas, but be explicit about where they came from.
 
+**Presenting results:** When an experiment finishes, just point Francisco to the plot/data file. Don't volunteer commentary or interpretation of results unless asked — Francisco prefers to look at plots himself and form his own conclusions. Also, don't try to interpret plots visually — Claude's vision is not reliable enough for reading precise values or subtle patterns off plots. If numerical analysis is needed, work with the raw data instead.
+
+**Answering questions:** When Francisco asks a question, answer it directly. Don't preemptively retract or redirect — just answer. If there's a correction to make, make it after answering, not instead of answering.
+
 ## Project Overview
 
 This project investigates what distinguishes real activations (arising from actual inputs) from arbitrary points in activation space in language models. We want to characterize the geometric properties of real activations, random activations, and boundary points (identified during interpolation between real activations).

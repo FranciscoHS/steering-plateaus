@@ -20,10 +20,13 @@ MODEL_ALIASES = {
     'gemma-3-1b': 'google/gemma-3-1b-pt',
     'gemma-3-4b': 'google/gemma-3-4b-pt',
     'gemma-3-12b': 'google/gemma-3-12b-pt',
-    'csp': 'openai/circuit-sparsity',
+    'csp': 'csp_yolo2',
+    'csp_yolo1': 'csp_yolo1',
+    'csp_hf': 'openai/circuit-sparsity',
     'dense_csp_1x': 'dense1_1x',
     'dense_csp_2x': 'dense1_2x',
     'dense_csp_4x': 'dense1_4x',
+    'tinystories-28m': 'roneneldan/TinyStories-28M',
     'chess_16L': 'lichess_16layers_ckpt_no_optimizer.pt',
     'chess_8L': 'lichess_8layers_ckpt_no_optimizer.pt',
 }
@@ -153,8 +156,8 @@ def load_model(model_name='gpt2', device=None, dtype=None):
     is_gpt2 = model_name.startswith('gpt2')
     is_chess = model_name.startswith('chess')
 
-    is_csp = model_name.startswith('csp')
-    is_dense_csp = model_name.startswith('dense_csp')
+    is_csp = model_name == 'csp_hf'  # HF loading path (trust_remote_code)
+    is_blob_csp = model_name.startswith('dense_csp') or model_name in ('csp_yolo1', 'csp')
 
     if is_chess:
         # nanoGPT chess model (adamkarvonen/chess_llms) loaded into HF GPT-2
@@ -185,7 +188,7 @@ def load_model(model_name='gpt2', device=None, dtype=None):
         tokenizer = None  # Character-level encoding handled by data loader
         model_type = 'gpt2'
         d_model = 512
-    elif is_dense_csp:
+    elif is_blob_csp:
         # Load dense CSP baseline via native circuit_sparsity loader
         # Workaround: the installed package's GPTConfig doesn't accept all config
         # fields from the blob storage configs, so we filter kwargs manually.
@@ -255,6 +258,8 @@ def load_model(model_name='gpt2', device=None, dtype=None):
         config_type = getattr(model.config, 'model_type', '')
         if config_type.startswith('gemma3'):
             model_type = 'gemma3'
+        elif config_type in ('gpt_neo', 'gpt_neox'):
+            model_type = 'gpt2'  # GPT-Neo has identical structure to GPT-2
         else:
             model_type = 'llama'  # Llama-architecture (Qwen3, Llama, Gemma 1/2, etc.)
         d_model = model.config.hidden_size

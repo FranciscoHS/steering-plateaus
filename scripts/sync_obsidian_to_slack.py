@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Sync Obsidian daily lab log to #lab-log-francisco on Slack.
 
-Reads today's log file, splits into sections by bold headers,
-converts Obsidian markdown to Slack format, and posts new sections.
-Images referenced with ![[file.png]] are uploaded as thread replies.
+Posts one thread per day: a header message ("Lab log: YYYY-MM-DD") as the
+parent, and each bold-header section as a sequence of thread replies with
+images interleaved where they appear in the original text.
+
+On subsequent runs, new sections are added and modified sections are edited
+in place (matched by header text). Checks the last 5 days by default so
+missed runs (e.g. laptop was off) get caught up.
 
 Usage:
-    python sync_obsidian_to_slack.py              # Sync today's log
-    python sync_obsidian_to_slack.py 2026-02-27   # Sync a specific date
+    python sync_obsidian_to_slack.py              # Sync last 5 days
+    python sync_obsidian_to_slack.py 2026-02-27   # Sync a specific date only
     python sync_obsidian_to_slack.py --dry-run    # Preview without posting
-    python sync_obsidian_to_slack.py --install-cron  # Print cron setup
 
 Config:
     Store your Slack bot token in ~/.config/obsidian-slack-sync/token
@@ -22,7 +25,7 @@ import sys
 import json
 import hashlib
 import argparse
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 try:
@@ -38,6 +41,11 @@ STATE_FILE = Path.home() / ".local" / "share" / "obsidian-slack-sync" / "state.j
 TOKEN_FILE = Path.home() / ".config" / "obsidian-slack-sync" / "token"
 SLACK_CHANNEL = "C0A83J9HF8W"  # #lab-log-francisco
 SLACK_API = "https://slack.com/api"
+LOOKBACK_DAYS = 5
+
+IMAGE_RE = re.compile(
+    r"!\[\[([^\]]+\.(?:png|jpg|jpeg|gif|svg))\]\]", re.IGNORECASE
+)
 
 
 def get_token():
@@ -50,18 +58,38 @@ def get_token():
     return None
 
 
-def slack_post(token, channel, text):
+# --- Slack API helpers ---
+
+
+def slack_post(token, channel, text, thread_ts=None):
     """Post a message to Slack. Returns message ts on success."""
+    payload = {"channel": channel, "text": text}
+    if thread_ts:
+        payload["thread_ts"] = thread_ts
     resp = requests.post(
         f"{SLACK_API}/chat.postMessage",
         headers={"Authorization": f"Bearer {token}"},
-        json={"channel": channel, "text": text},
+        json=payload,
     )
     data = resp.json()
     if not data.get("ok"):
         print(f"  Slack error: {data.get('error', 'unknown')}")
         return None
     return data.get("ts")
+
+
+def slack_update(token, channel, ts, text):
+    """Edit an existing Slack message. Returns True on success."""
+    resp = requests.post(
+        f"{SLACK_API}/chat.update",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"channel": channel, "ts": ts, "text": text},
+    )
+    data = resp.json()
+    if not data.get("ok"):
+        print(f"  Slack update error: {data.get('error', 'unknown')}")
+        return False
+    return True
 
 
 def slack_upload_file(token, channel, filepath, thread_ts=None):
@@ -73,7 +101,6 @@ def slack_upload_file(token, channel, filepath, thread_ts=None):
     file_size = filepath.stat().st_size
     filename = filepath.name
 
-    # Step 1: Get upload URL
     resp = requests.post(
         f"{SLACK_API}/files.getUploadURLExternal",
         headers={"Authorization": f"Bearer {token}"},
@@ -87,14 +114,12 @@ def slack_upload_file(token, channel, filepath, thread_ts=None):
     upload_url = data["upload_url"]
     file_id = data["file_id"]
 
-    # Step 2: Upload file content
     with open(filepath, "rb") as f:
         resp = requests.post(upload_url, files={"file": (filename, f)})
     if resp.status_code != 200:
         print(f"  File upload failed: HTTP {resp.status_code}")
         return None
 
-    # Step 3: Complete upload and share in channel/thread
     complete_data = {
         "files": [{"id": file_id, "title": filename}],
         "channel_id": channel,
@@ -133,32 +158,35 @@ def strip_task_list(content):
     """Remove checkbox task list from the top of the file."""
     lines = content.split("\n")
     i = 0
-    # Skip lines that are task items or blank lines between them
     while i < len(lines):
         stripped = lines[i].strip()
         if stripped.startswith("- [") or (stripped == "" and i > 0):
             i += 1
         else:
             break
-    # Also skip any leading blank lines after the task block
     while i < len(lines) and lines[i].strip() == "":
         i += 1
     return "\n".join(lines[i:])
 
 
+def extract_header(section):
+    """Extract the bold header text from a section, or None if no header."""
+    m = re.match(r"^\s*\*\*([^*]+)\*\*\s*$", section.split("\n")[0])
+    if m:
+        return m.group(1).strip()
+    return None
+
+
 def split_into_sections(content):
     """Split content into sections by bold headers (**...**).
 
-    Each section starts with a bold header line (if present) and includes
-    all content up to the next bold header. Content before the first bold
-    header (if any) forms its own section.
+    Returns list of (header_or_None, full_section_text) tuples.
     """
     sections = []
     current_lines = []
 
     for line in content.split("\n"):
         if re.match(r"^\s*\*\*[^*]+\*\*\s*$", line):
-            # Bold header — start a new section
             text = "\n".join(current_lines).strip()
             if text:
                 sections.append(text)
@@ -166,78 +194,88 @@ def split_into_sections(content):
         else:
             current_lines.append(line)
 
-    # Last section
     text = "\n".join(current_lines).strip()
     if text:
         sections.append(text)
 
-    return sections
+    return [(extract_header(s), s) for s in sections]
+
+
+def split_section_into_parts(section_text):
+    """Split a section into alternating text and image parts.
+
+    Returns a list of ("text", slack_text) or ("image", filename) tuples,
+    preserving the order images appear in the original text.
+    """
+    parts = []
+    # Split on image embeds, keeping the captures
+    pieces = IMAGE_RE.split(section_text)
+    # pieces alternates: text, image_filename, text, image_filename, ...
+    for idx, piece in enumerate(pieces):
+        if idx % 2 == 0:
+            # Text chunk — convert to slack format
+            slack_text = obsidian_to_slack_raw(piece)
+            if slack_text:
+                parts.append(("text", slack_text))
+        else:
+            # Image filename
+            parts.append(("image", piece))
+    return parts
 
 
 def find_image(filename):
-    """Find an image file in the Obsidian vault.
-
-    Obsidian stores attachments at the vault root by default.
-    Also checks the project directory as a fallback.
-    """
-    # Vault root (where Obsidian stores attachments by default)
+    """Find an image file in the Obsidian vault."""
     path = VAULT_DIR / filename
     if path.exists():
         return path
-    # Project directory
     path = LOG_DIR / filename
     if path.exists():
         return path
     return None
 
 
-def extract_images(text):
-    """Extract image filenames referenced via ![[file.png]] in text."""
-    return re.findall(
-        r"!\[\[([^\]]+\.(?:png|jpg|jpeg|gif|svg))\]\]", text, re.IGNORECASE
-    )
-
-
-def obsidian_to_slack(text):
+def obsidian_to_slack_raw(text):
     """Convert Obsidian markdown to Slack mrkdwn format.
 
-    Handles: image embeds, wikilinks, bold markers, markdown links,
-    LaTeX blocks. Leaves inline LaTeX ($...$) as-is since it's
-    readable enough in plain text.
+    Like obsidian_to_slack but does NOT strip image embeds (caller handles those).
     """
-    # Remove image embeds (handled separately via file upload)
-    text = re.sub(
-        r"!\[\[([^\]]+\.(?:png|jpg|jpeg|gif|svg))\]\]\n?",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    )
-
-    # Wikilinks: [[target|display]] -> display, [[target]] -> target
+    # Wikilinks
     text = re.sub(r"\[\[([^|\]]+)\|([^\]]+)\]\]", r"\2", text)
     text = re.sub(r"\[\[([^\]]+)\]\]", r"\1", text)
-
-    # Bold: **text** -> *text*  (Slack uses single * for bold)
+    # Bold: **text** -> *text*
     text = re.sub(r"\*\*([^*]+)\*\*", r"*\1*", text)
-
     # Markdown links: [text](url) -> <url|text>
     text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"<\2|\1>", text)
-
-    # LaTeX block equations -> bracketed notation
+    # LaTeX block equations
     text = re.sub(
         r"\\begin\{equation\}(.*?)\\end\{equation\}",
         lambda m: "[equation: " + m.group(1).strip() + "]",
         text,
         flags=re.DOTALL,
     )
-
-    # Collapse 3+ consecutive blank lines to 2
+    # Collapse excessive blank lines
     text = re.sub(r"\n{3,}", "\n\n", text)
-
     return text.strip()
 
 
 # --- State management ---
+#
+# State format (v3):
+# {
+#   "2026-03-05": {
+#     "thread_ts": "1234567890.123456",
+#     "sections": {
+#       "Morning work": {
+#         "hash": "abc123",
+#         "parts": [
+#           {"type": "text", "ts": "1234567890.234567"},
+#           {"type": "image", "name": "plot.png"},
+#           {"type": "text", "ts": "1234567890.345678"}
+#         ]
+#       }
+#     }
+#   }
+# }
 
 
 def section_hash(text):
@@ -256,100 +294,231 @@ def save_state(state):
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
 
+def migrate_state(state):
+    """Migrate old state formats to current format.
+
+    v1 (lists of hashes) and v2 (sections with single ts) are dropped
+    since we can't recover thread structure from them.
+    """
+    migrated = False
+    for key, val in list(state.items()):
+        if isinstance(val, list):
+            del state[key]
+            migrated = True
+        elif isinstance(val, dict) and "sections" in val:
+            # Check if any section uses old v2 format (has "ts" key instead of "parts")
+            for sec_val in val["sections"].values():
+                if "ts" in sec_val and "parts" not in sec_val:
+                    # v2 format — drop entire day to re-sync
+                    del state[key]
+                    migrated = True
+                    break
+    if migrated:
+        save_state(state)
+        print("Migrated state file (old entries dropped, will re-sync)")
+    return state
+
+
 # --- Main logic ---
 
 
-def sync_log(log_date, dry_run=False):
-    """Sync a day's log to Slack. Only posts sections not yet posted."""
+def section_key(header, index):
+    """State key for a section: header text, or _noheader_N for headerless ones."""
+    if header:
+        return header
+    return f"_noheader_{index}"
+
+
+def post_section_parts(parts, token, thread_ts, dry_run=False):
+    """Post a sequence of text/image parts as thread replies.
+
+    Returns list of part state dicts for storage, or None on failure.
+    """
+    part_states = []
+    for part_type, content in parts:
+        if part_type == "text":
+            if dry_run:
+                preview = content[:200] + ("..." if len(content) > 200 else "")
+                print(f"    [text] {preview}")
+                part_states.append({"type": "text", "ts": "dry-run"})
+            else:
+                ts = slack_post(token, SLACK_CHANNEL, content, thread_ts=thread_ts)
+                if not ts:
+                    return None
+                part_states.append({"type": "text", "ts": ts})
+        elif part_type == "image":
+            img_path = find_image(content)
+            if dry_run:
+                status = "found" if img_path else "NOT FOUND"
+                print(f"    [image] {content} ({status})")
+                part_states.append({"type": "image", "name": content})
+            else:
+                if img_path:
+                    slack_upload_file(token, SLACK_CHANNEL, img_path, thread_ts=thread_ts)
+                    print(f"    Uploaded {content}")
+                else:
+                    print(f"    Image not found: {content}")
+                part_states.append({"type": "image", "name": content})
+    return part_states
+
+
+def update_section_parts(new_parts, old_part_states, token, thread_ts, dry_run=False):
+    """Update an existing section's parts.
+
+    Edits text messages in place where possible, uploads new images,
+    appends any extra parts that didn't exist before.
+    """
+    updated_states = []
+    old_text_ts = [p["ts"] for p in old_part_states if p["type"] == "text"]
+    old_images = {p["name"] for p in old_part_states if p["type"] == "image"}
+    text_idx = 0
+
+    for part_type, content in new_parts:
+        if part_type == "text":
+            if text_idx < len(old_text_ts):
+                # Edit existing text message
+                ts = old_text_ts[text_idx]
+                if dry_run:
+                    preview = content[:200] + ("..." if len(content) > 200 else "")
+                    print(f"    [edit text] {preview}")
+                else:
+                    slack_update(token, SLACK_CHANNEL, ts, content)
+                updated_states.append({"type": "text", "ts": ts})
+                text_idx += 1
+            else:
+                # New text part — append
+                if dry_run:
+                    preview = content[:200] + ("..." if len(content) > 200 else "")
+                    print(f"    [new text] {preview}")
+                    updated_states.append({"type": "text", "ts": "dry-run"})
+                else:
+                    ts = slack_post(token, SLACK_CHANNEL, content, thread_ts=thread_ts)
+                    if ts:
+                        updated_states.append({"type": "text", "ts": ts})
+        elif part_type == "image":
+            if content in old_images:
+                # Already uploaded — keep it
+                if dry_run:
+                    print(f"    [image, already uploaded] {content}")
+                updated_states.append({"type": "image", "name": content})
+            else:
+                # New image — upload
+                img_path = find_image(content)
+                if dry_run:
+                    status = "found" if img_path else "NOT FOUND"
+                    print(f"    [new image] {content} ({status})")
+                else:
+                    if img_path:
+                        slack_upload_file(token, SLACK_CHANNEL, img_path, thread_ts=thread_ts)
+                        print(f"    Uploaded {content}")
+                    else:
+                        print(f"    Image not found: {content}")
+                updated_states.append({"type": "image", "name": content})
+
+    return updated_states
+
+
+def sync_log(log_date, dry_run=False, token=None):
+    """Sync a day's log to Slack as a thread.
+
+    Creates a parent message ("Lab log: YYYY-MM-DD") if needed, then
+    posts each section as a sequence of text/image thread replies.
+    Edited sections get updated in place (matched by header text).
+    """
+    content = get_log_content(log_date)
+    if not content:
+        return
+
+    content = strip_task_list(content)
+    if not content.strip():
+        return
+
+    sections = split_into_sections(content)
+    state = load_state()
+    day_state = state.get(log_date, {})
+    thread_ts = day_state.get("thread_ts")
+    posted_sections = day_state.get("sections", {})
+
+    new_count = 0
+    updated_count = 0
+
+    # Create thread parent if needed
+    if not thread_ts:
+        header_text = f"Lab log: {log_date}"
+        if dry_run:
+            print(f"\n=== Would create thread: {header_text} ===")
+        else:
+            thread_ts = slack_post(token, SLACK_CHANNEL, header_text)
+            if not thread_ts:
+                print(f"  Failed to create thread for {log_date}")
+                return
+            day_state["thread_ts"] = thread_ts
+            print(f"  Created thread for {log_date}")
+
+    for i, (header, section_text) in enumerate(sections):
+        key = section_key(header, i)
+        h = section_hash(section_text)
+        existing = posted_sections.get(key)
+
+        if existing and existing["hash"] == h:
+            continue
+
+        parts = split_section_into_parts(section_text)
+        if not parts:
+            continue
+
+        if dry_run:
+            action = "UPDATE" if existing else "NEW"
+            print(f"\n  --- [{action}] {key} ---")
+
+        if existing:
+            part_states = update_section_parts(
+                parts, existing.get("parts", []), token, thread_ts, dry_run
+            )
+            posted_sections[key] = {"hash": h, "parts": part_states}
+            updated_count += 1
+            if not dry_run:
+                print(f"  Updated: {key}")
+        else:
+            part_states = post_section_parts(parts, token, thread_ts, dry_run)
+            if part_states is not None:
+                posted_sections[key] = {"hash": h, "parts": part_states}
+                new_count += 1
+                if not dry_run:
+                    print(f"  Posted: {key}")
+
+    if not dry_run:
+        day_state["sections"] = posted_sections
+        state[log_date] = day_state
+        save_state(state)
+        if new_count or updated_count:
+            print(f"  {log_date}: {new_count} new, {updated_count} updated")
+    else:
+        total = sum(
+            1 for i, (h, s) in enumerate(sections)
+            if section_hash(s) != (posted_sections.get(section_key(h, i)) or {}).get("hash")
+        )
+        if total:
+            print(f"\nDry run: {total} section(s) would be posted/updated for {log_date}")
+
+
+def sync_recent(days, dry_run=False):
+    """Sync the last N days of logs."""
+    token = None
     if not dry_run:
         token = get_token()
         if not token:
             print(f"Error: No Slack bot token found.")
             print(f"Set SLACK_BOT_TOKEN env var or put token in {TOKEN_FILE}")
             return
-    else:
-        token = None
 
-    content = get_log_content(log_date)
-    if not content:
-        print(f"No log found for {log_date}")
-        return
-
-    content = strip_task_list(content)
-    if not content.strip():
-        print(f"Log for {log_date} is empty after stripping task list")
-        return
-
-    sections = split_into_sections(content)
     state = load_state()
-    posted = set(state.get(log_date, []))
-    new_count = 0
+    migrate_state(state)
 
-    for i, section in enumerate(sections):
-        h = section_hash(section)
-        if h in posted:
-            continue
-
-        slack_text = obsidian_to_slack(section)
-        if not slack_text:
-            continue
-
-        images = extract_images(section)
-
-        if dry_run:
-            preview = slack_text[:300] + ("..." if len(slack_text) > 300 else "")
-            print(f"\n--- Section {i+1} ({len(slack_text)} chars) ---")
-            print(preview)
-            if images:
-                found = []
-                missing = []
-                for img in images:
-                    if find_image(img):
-                        found.append(img)
-                    else:
-                        missing.append(img)
-                if found:
-                    print(f"  Images to upload: {', '.join(found)}")
-                if missing:
-                    print(f"  Images not found: {', '.join(missing)}")
-        else:
-            ts = slack_post(token, SLACK_CHANNEL, slack_text)
-            if ts:
-                # Upload images as thread replies
-                for img_name in images:
-                    img_path = find_image(img_name)
-                    if img_path:
-                        slack_upload_file(token, SLACK_CHANNEL, img_path, thread_ts=ts)
-                        print(f"  Uploaded {img_name}")
-                    else:
-                        print(f"  Image not found: {img_name}")
-
-                posted.add(h)
-                new_count += 1
-                print(f"  Posted section {i+1} ({len(slack_text)} chars)")
-
-    if not dry_run:
-        state[log_date] = list(posted)
-        save_state(state)
-        print(f"\nDone: {new_count} new section(s) posted for {log_date}")
-    else:
-        new = sum(1 for s in sections if section_hash(s) not in posted)
-        print(f"\nDry run: {new} section(s) would be posted for {log_date}")
-
-
-def install_cron():
-    """Print cron entries for twice-daily sync."""
-    script_path = Path(__file__).resolve()
-    python = sys.executable
-    cron_lines = [
-        f"0 8 * * 1-5 {python} {script_path}",
-        f"0 18 * * 1-5 {python} {script_path}",
-    ]
-    print("Add these lines to your crontab (crontab -e):\n")
-    for line in cron_lines:
-        print(f"  {line}")
-    print(f"\nMake sure your bot token is in {TOKEN_FILE}")
-    print("(Or set SLACK_BOT_TOKEN in the cron environment)")
+    today = date.today()
+    for offset in range(days - 1, -1, -1):
+        log_date = (today - timedelta(days=offset)).isoformat()
+        sync_log(log_date, dry_run=dry_run, token=token)
 
 
 def main():
@@ -359,25 +528,27 @@ def main():
     parser.add_argument(
         "date",
         nargs="?",
-        default=date.today().isoformat(),
-        help="Date to sync (YYYY-MM-DD), defaults to today",
+        default=None,
+        help="Date to sync (YYYY-MM-DD). If omitted, syncs last 5 days.",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Preview what would be posted without actually posting",
     )
-    parser.add_argument(
-        "--install-cron",
-        action="store_true",
-        help="Print cron entries for automatic scheduling",
-    )
     args = parser.parse_args()
 
-    if args.install_cron:
-        install_cron()
+    if args.date:
+        token = None
+        if not args.dry_run:
+            token = get_token()
+            if not token:
+                print(f"Error: No Slack bot token found.")
+                print(f"Set SLACK_BOT_TOKEN env var or put token in {TOKEN_FILE}")
+                return
+        sync_log(args.date, dry_run=args.dry_run, token=token)
     else:
-        sync_log(args.date, dry_run=args.dry_run)
+        sync_recent(LOOKBACK_DAYS, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
