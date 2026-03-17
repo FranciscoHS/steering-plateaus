@@ -62,70 +62,106 @@ def capped_melbo_one_direction(model, ctx, act, ref_L, a_unit, a_norm,
                                 angle_rad, target_cos, prev_directions,
                                 inject_layer, measure_layer, device, d_model,
                                 n_steps=300, lr=0.01, n_restarts=3):
-    """Find one direction via capped MELBO, orthogonalized to prev_directions."""
+    """Find one direction via capped MELBO, orthogonalized to prev_directions.
+
+    Optimizes n_restarts candidates in parallel (batched forward passes)
+    with early stopping per candidate.
+    """
     cos_theta = np.cos(angle_rad)
     sin_theta = np.sin(angle_rad)
+    B = n_restarts
+
+    # Initialize B random directions
+    directions = torch.randn(B, d_model, device=device)
+    for b in range(B):
+        directions[b] -= (directions[b] @ a_unit) * a_unit
+        for pd in prev_directions:
+            directions[b] -= (directions[b] @ pd) * pd
+        directions[b] = F.normalize(directions[b], dim=0)
+    directions = directions.clone().detach().requires_grad_(True)
+
+    optimizer = torch.optim.Adam([directions], lr=lr)
+
+    # Expand ctx for batch: [1, seq-1, d] -> [B, seq-1, d]
+    ctx_batch = ctx.expand(B, -1, -1)
+    ref_L_batch = ref_L.expand(B, -1)
+
+    # Early stopping state per candidate
+    early_stop_patience = 50
+    best_rewards_running = torch.full((B,), -float('inf'), device=device)
+    steps_without_improvement = torch.zeros(B, dtype=torch.long, device=device)
+    active = torch.ones(B, dtype=torch.bool, device=device)
 
     best_reward = -float('inf')
     best_direction = None
-    best_history = None
+    best_cos_dist = 0.0
 
-    for restart in range(n_restarts):
-        direction = torch.randn(d_model, device=device)
-        direction = direction - (direction @ a_unit) * a_unit
+    for step in range(n_steps):
+        if not active.any():
+            break
+
+        optimizer.zero_grad()
+
+        # Normalize and orthogonalize all candidates
+        d = directions / directions.norm(dim=1, keepdim=True)
+        d = d - (d @ a_unit).unsqueeze(1) * a_unit.unsqueeze(0)
         for pd in prev_directions:
-            direction = direction - (direction @ pd) * pd
-        direction = F.normalize(direction, dim=0)
-        direction = direction.clone().detach().requires_grad_(True)
+            d = d - (d @ pd).unsqueeze(1) * pd.unsqueeze(0)
+        d = d / (d.norm(dim=1, keepdim=True) + 1e-10)
 
-        optimizer = torch.optim.Adam([direction], lr=lr)
-        history = []
+        # Batched perturbation: [B, d_model]
+        a_pert = a_norm * (cos_theta * a_unit.unsqueeze(0) + sin_theta * d)
+        pert_L = forward_to_L(model, ctx_batch, a_pert, inject_layer, measure_layer)
 
-        for step in range(n_steps):
-            optimizer.zero_grad()
+        cos_dist = 1 - F.cosine_similarity(ref_L_batch, pert_L, dim=-1)  # [B]
+        rewards = cos_dist * torch.exp(-cos_dist / target_cos)  # [B]
 
-            d = direction / direction.norm()
-            d = d - (d @ a_unit) * a_unit
+        # Only backprop active candidates
+        loss = -(rewards * active.float()).sum()
+        loss.backward()
+
+        # Zero gradients for stopped candidates
+        with torch.no_grad():
+            if directions.grad is not None:
+                directions.grad[~active] = 0
+
+        optimizer.step()
+
+        # Project back
+        with torch.no_grad():
+            directions.data -= (directions.data @ a_unit).unsqueeze(1) * a_unit.unsqueeze(0)
             for pd in prev_directions:
-                d = d - (d @ pd) * pd
-            d = d / (d.norm() + 1e-10)
+                directions.data -= (directions.data @ pd).unsqueeze(1) * pd.unsqueeze(0)
 
-            a_pert = a_norm * (cos_theta * a_unit + sin_theta * d)
-            pert_L = forward_to_L(model, ctx, a_pert.unsqueeze(0),
-                                  inject_layer, measure_layer)
+        # Early stopping check
+        with torch.no_grad():
+            improved = rewards > best_rewards_running * 1.1
+            best_rewards_running = torch.where(improved, rewards, best_rewards_running)
+            steps_without_improvement = torch.where(improved,
+                torch.zeros_like(steps_without_improvement),
+                steps_without_improvement + 1)
+            newly_stopped = (steps_without_improvement >= early_stop_patience) & active
+            active = active & (steps_without_improvement < early_stop_patience)
 
-            cos_dist = 1 - F.cosine_similarity(ref_L, pert_L, dim=-1)
-            cos_dist = cos_dist.squeeze()
-            reward = cos_dist * torch.exp(-cos_dist / target_cos)
+            # Track global best
+            for b in range(B):
+                if rewards[b].item() > best_reward:
+                    best_reward = rewards[b].item()
+                    d_final = directions[b].data / directions[b].data.norm()
+                    d_final = d_final - (d_final @ a_unit) * a_unit
+                    for pd in prev_directions:
+                        d_final = d_final - (d_final @ pd) * pd
+                    d_final = d_final / d_final.norm()
+                    best_direction = d_final.clone()
+                    best_cos_dist = cos_dist[b].item()
 
-            loss = -reward
-            loss.backward()
-            optimizer.step()
+        if step % 100 == 0 or step == n_steps - 1:
+            best_b = rewards.argmax().item()
+            n_active = active.sum().item()
+            print(f"      step {step}: best_reward={rewards[best_b].item():.6f}, "
+                  f"cos_dist={cos_dist[best_b].item():.4f}, active={n_active}/{B}")
 
-            with torch.no_grad():
-                direction.data -= (direction.data @ a_unit) * a_unit
-                for pd in prev_directions:
-                    direction.data -= (direction.data @ pd) * pd
-
-            history.append((reward.item(), cos_dist.item()))
-
-            if step % 100 == 0 or step == n_steps - 1:
-                print(f"      restart {restart+1}/{n_restarts}, step {step}: "
-                      f"reward={reward.item():.6f}, cos_dist={cos_dist.item():.4f}")
-
-        final_reward = history[-1][0]
-        if final_reward > best_reward:
-            best_reward = final_reward
-            with torch.no_grad():
-                d_final = direction / direction.norm()
-                d_final = d_final - (d_final @ a_unit) * a_unit
-                for pd in prev_directions:
-                    d_final = d_final - (d_final @ pd) * pd
-                d_final = d_final / d_final.norm()
-                best_direction = d_final.clone()
-            best_history = history
-
-    return best_direction, best_reward, best_history
+    return best_direction, best_reward, [(best_reward, best_cos_dist)]
 
 
 def refine_in_cone(model, ctx, act, ref_L, a_unit, a_norm,
@@ -233,8 +269,9 @@ def main():
     parser.add_argument('--seed_directions', type=str, default=None,
                         help='Path to results.pkl; loads directions as frozen seeds for orthogonality')
 
-    parser.add_argument('--n_steps', type=int, default=300)
-    parser.add_argument('--n_restarts', type=int, default=3)
+    parser.add_argument('--n_steps', type=int, default=200)
+    parser.add_argument('--n_restarts', type=int, default=8,
+                        help='Number of parallel candidates per direction (batched)')
     parser.add_argument('--lr', type=float, default=0.01)
 
     # Local opt config

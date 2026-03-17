@@ -28,6 +28,8 @@ MODEL_ALIASES = {
     'dense_csp_1x': 'dense1_1x',
     'dense_csp_2x': 'dense1_2x',
     'dense_csp_4x': 'dense1_4x',
+    'deepseek-r1-distill-qwen-7b': 'deepseek-ai/DeepSeek-R1-Distill-Qwen-7B',
+    'llama-3.1-8b': 'meta-llama/Llama-3.1-8B',
     'tinystories-28m': 'roneneldan/TinyStories-28M',
     'chess_16L': 'lichess_16layers_ckpt_no_optimizer.pt',
     'chess_8L': 'lichess_8layers_ckpt_no_optimizer.pt',
@@ -255,7 +257,8 @@ def load_model(model_name='gpt2', device=None, dtype=None):
         d_model = model.config.hidden_size
     else:
         load_dtype = dtype if dtype is not None else torch.float32
-        model = AutoModelForCausalLM.from_pretrained(hf_name, torch_dtype=load_dtype).to(device)
+        model = AutoModelForCausalLM.from_pretrained(
+            hf_name, torch_dtype=load_dtype, device_map=device)
         tokenizer = AutoTokenizer.from_pretrained(hf_name)
         config_type = getattr(model.config, 'model_type', '')
         if config_type.startswith('gemma3'):

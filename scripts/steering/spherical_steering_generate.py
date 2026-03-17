@@ -30,7 +30,7 @@ from src.model import load_model, _get_blocks
 from data.bilingual_prompts import ENGLISH_PROMPTS, CHINESE_PROMPTS
 
 
-def extract_pc1(model, tokenizer, device, layer):
+def extract_pc1(model, tokenizer, device, layer, skip_svd=False):
     """Extract PC1 from English-Chinese activation difference matrix.
 
     D = en_acts - zh_acts at last token position.
@@ -54,12 +54,20 @@ def extract_pc1(model, tokenizer, device, layer):
     en_acts = get_acts(ENGLISH_PROMPTS)
     zh_acts = get_acts(CHINESE_PROMPTS)
 
+    en_acts = en_acts.float()
+    zh_acts = zh_acts.float()
     all_acts = torch.cat([en_acts, zh_acts], dim=0)
     mean_norm = all_acts.norm(dim=-1).mean().item()
 
     D = en_acts - zh_acts  # [n_pairs, d_model]
     mean_vec = D.mean(dim=0)
     mean_dir = mean_vec / mean_vec.norm()
+
+    print(f"  D shape: {D.shape}, mean diff norm: {mean_vec.norm():.2f}")
+    print(f"  Mean activation norm: {mean_norm:.2f}")
+
+    if skip_svd:
+        return mean_dir, mean_norm
 
     U, S, Vh = torch.linalg.svd(D, full_matrices=False)
     pc1 = Vh[0]  # [d_model]
@@ -69,10 +77,8 @@ def extract_pc1(model, tokenizer, device, layer):
         pc1 = -pc1
 
     var_explained = S[0]**2 / (S**2).sum()
-    print(f"  D shape: {D.shape}, mean diff norm: {mean_vec.norm():.2f}")
     print(f"  PC1 variance explained: {var_explained:.3f}")
     print(f"  cos(PC1, mean): {(pc1 @ mean_dir).item():.3f}")
-    print(f"  Mean activation norm: {mean_norm:.2f}")
 
     return pc1, mean_dir, mean_norm
 
@@ -316,6 +322,9 @@ def main():
                         help='rolling: steer all positions from last prompt token onward; '
                              'last_token: steer only the current token (like You et al. 2026)')
     parser.add_argument('--results_dir', default=None)
+    parser.add_argument('--dtype', type=str, default='float32',
+                        choices=['float32', 'bfloat16', 'float16'],
+                        help='Model dtype (use bfloat16 for large models)')
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
 
@@ -345,19 +354,21 @@ def main():
     print(f"Tokens per generation: {args.n_tokens}")
 
     # Load model
-    print(f"\nLoading model: {args.model}")
-    model, tokenizer, device = load_model(args.model)
+    dtype_map = {'float32': None, 'bfloat16': torch.bfloat16, 'float16': torch.float16}
+    load_dtype = dtype_map[args.dtype]
+    print(f"\nLoading model: {args.model} (dtype={args.dtype})")
+    model, tokenizer, device = load_model(args.model, dtype=load_dtype)
 
     # Get steering direction
-    if args.direction in ('pc1', 'mean'):
-        # Extract from bilingual prompts directly
+    if args.direction == 'mean':
+        # Compute difference-of-means directly (no SVD needed)
+        mean_dir, mean_norm = extract_pc1(model, tokenizer, device, args.layer, skip_svd=True)
+        steer_unit = mean_dir
+        dir_label = 'Diff-of-means'
+    elif args.direction == 'pc1':
         pc1, mean_dir, mean_norm = extract_pc1(model, tokenizer, device, args.layer)
-        if args.direction == 'pc1':
-            steer_unit = pc1
-            dir_label = 'PC1'
-        else:
-            steer_unit = mean_dir
-            dir_label = 'Diff-of-means'
+        steer_unit = pc1
+        dir_label = 'PC1'
     else:
         # Load from MELBO results
         melbo_path = args.melbo_results

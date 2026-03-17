@@ -15,10 +15,6 @@ I am Francisco, a researcher with a PhD in Quantum Info who is now working on me
 
 **Answering questions:** When Francisco asks a question, answer it directly. Don't preemptively retract or redirect — just answer. If there's a correction to make, make it after answering, not instead of answering.
 
-## Project Overview
-
-This project investigates what distinguishes real activations (arising from actual inputs) from arbitrary points in activation space in language models. We want to characterize the geometric properties of real activations, random activations, and boundary points (identified during interpolation between real activations).
-
 ## Error Correction and Plateaus — Conceptual Primer
 
 **This is essential context for understanding the project. Read carefully.**
@@ -45,58 +41,8 @@ The predicted ordering of plateau length is: **1 feature < 2 features < ... < K 
 
 **If error correction is the right explanation AND the probes are the model's true features**, this ordering must hold. If it doesn't, either (a) error correction is wrong, or (b) the probes are not the model's true computational features.
 
-## Existing Code
-
-Look at these files for existing infrastructure and patterns:
-- `src/model.py`
-- `src/analysis.py`
-- `src/visualization.py`
-
-## Task
-
-Implement code for:
-1. Sampling real activations from FineWeb
-2. Sampling random activations (Gaussian with matched mean and full covariance)
-3. Identifying boundary points via interpolation
-4. Computing Jacobian eigenspectrum
-5. Computing metrics and visualizations
-
-## Specifications
-
-### Model
-- GPT-2 Large
-- Residual stream activations
-- Final token position only
-- Layer as free parameter (start with layer 6)
-
-### Real activations
-- Source: FineWeb
-- Number of samples: 100 to start
-
-### Random activations
-- Gaussian with mean and full covariance matched to real activations
-- Same number of samples as real
-
-### Boundary points
-- Interpolate (slerp) between pairs of real activations
-- Identify boundary as point of maximum sensitivity along tangent to path
-
-### Jacobian computation
-- Jacobian of logits with respect to activations at layer L
-- Compute top-5 eigenvalues
-
-### Metrics
-- Jacobian norm: mean and std across samples
-- Logit entropy: as behavioral evaluation metric
-
-### Visualizations
-- Distributions of Jacobian norm across categories (real, random, boundary)
-
-## Project Context
-Research project investigating activation plateaus. All code is exploratory/research-oriented - no production requirements.
-
 ## Environment & Tools
-- **Compute:** RunPod spot instances (A100s)
+- **Compute:** RunPod spot instances
 - **Version control:** Git
 - **Logging:** Simple print statements (no wandb/tensorboard overhead)
 
@@ -126,6 +72,10 @@ Core stack:
 - transformers or transformer_lens
 - numpy, matplotlib
 - jupyter
+
+Optional / experiment-specific:
+- **GLP (Generative Latent Prior):** Used for projecting activations onto learned manifolds. The upstream repo (https://github.com/g-luo/generative_latent_prior) has a complex conda-based setup for vllm/nnsight compat, but for our use case (just loading and running the denoiser) you only need: `pip install omegaconf diffusers && pip install git+https://github.com/g-luo/generative_latent_prior.git`. Install `omegaconf` and `diffusers` first — GLP imports fail without them. Models are loaded from HuggingFace (e.g., `generative-latent-prior/glp-llama8b-d6`). On GPU-constrained setups, load GLP on CPU with `--glp_cpu`.
+- **sae_lens:** Used for loading Gemma Scope and GPT-2 SAEs. `pip install sae_lens`.
 
 Add others as needed during development.
 
@@ -206,8 +156,10 @@ Then update `~/.ssh/config.runpod_cli` with the correct HostName and Port.
 # Sync code TO RunPod (from project root) — replace ALIAS with your pod's SSH alias
 scp -r src/ scripts/ requirements.txt ALIAS:/workspace/steering-plateaus/
 
-# Sync results FROM RunPod
-scp -r ALIAS:/workspace/steering-plateaus/results/ ./results/
+# Sync results FROM RunPod — NOTE: use trailing /. on source to avoid nested dirs
+# Wrong: scp -r ALIAS:results/foo/ ./results/foo/  (creates ./results/foo/foo/)
+# Right: scp -r ALIAS:results/foo/. ./results/foo/
+scp -r ALIAS:/workspace/steering-plateaus/results/. ./results/
 
 # Run experiment on RunPod
 ssh ALIAS "cd /workspace/steering-plateaus && python scripts/your_script.py"
@@ -261,10 +213,3 @@ model.run_with_hooks(
 ```
 
 **Hook signature:** Always use `def hook(activation, hook):` — transformer_lens passes the hook object as second positional arg.
-
-## Session Logbook
-
-Detailed session notes are in `logbook.md`. Key experiments:
-- 2026-01-16: GPT-2 steering basics (big→in activation patching)
-- 2026-01-25: Sentiment steering attempts (mostly failed)
-- 2026-01-26: Refusal steering with Qwen (promising plateau-like structure)

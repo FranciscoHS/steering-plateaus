@@ -372,3 +372,7 @@ PROMPT_SETS = [
 
 # Number of prompt sets
 N_PROMPTS = len(PROMPT_SETS)
+
+# Convenience accessors for Python vs Haskell contrast
+PYTHON_PROMPTS = [ps['python'] for ps in PROMPT_SETS]
+HASKELL_PROMPTS = [ps['haskell'] for ps in PROMPT_SETS]

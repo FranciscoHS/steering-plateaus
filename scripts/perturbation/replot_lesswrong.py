@@ -89,17 +89,23 @@ def plot_median_shading(angles_deg, groups, config, save_path):
 
 
 def main():
-    results_dir = 'results/lesswrong_plot/gemma-2-2b'
-    for cfg_name in ['main', 'cosine', 'layer8']:
-        pkl_path = os.path.join(results_dir, f'curves_{cfg_name}.pkl')
-        if not os.path.exists(pkl_path):
-            print(f"Skipping {cfg_name}: {pkl_path} not found")
-            continue
-        angles_deg, groups, config = load_curves(pkl_path)
-        plot_3curves(angles_deg, groups, config,
-                     os.path.join(results_dir, f'plot_{cfg_name}_3curves.png'))
-        plot_median_shading(angles_deg, groups, config,
-                            os.path.join(results_dir, f'plot_{cfg_name}_median.png'))
+    import glob
+    model_dirs = sorted(glob.glob('results/lesswrong_plot/gemma-*'))
+    if not model_dirs:
+        print("No results found")
+        return
+    for results_dir in model_dirs:
+        print(f"\n=== {results_dir} ===")
+        for cfg_name in ['main', 'cosine', 'layer8']:
+            pkl_path = os.path.join(results_dir, f'curves_{cfg_name}.pkl')
+            if not os.path.exists(pkl_path):
+                print(f"Skipping {cfg_name}: {pkl_path} not found")
+                continue
+            angles_deg, groups, config = load_curves(pkl_path)
+            plot_3curves(angles_deg, groups, config,
+                         os.path.join(results_dir, f'plot_{cfg_name}_3curves.png'))
+            plot_median_shading(angles_deg, groups, config,
+                                os.path.join(results_dir, f'plot_{cfg_name}_median.png'))
 
 
 if __name__ == '__main__':

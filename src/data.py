@@ -185,10 +185,11 @@ def load_fineweb_samples(n, tokenizer, min_tokens=10, max_tokens=512, seed=42):
     return texts, token_counts
 
 
-def load_fineweb_fixed_length(n, tokenizer, seq_len=5, seed=42):
+def load_fineweb_fixed_length(n, tokenizer, seq_len=5, seed=42, cache_dir="/workspace/fineweb_cache"):
     """
     Load FineWeb samples tokenized to exactly seq_len tokens.
 
+    Checks for a cached file first (on network volume) to avoid re-streaming.
     Truncates longer texts to seq_len. Skips texts shorter than seq_len.
 
     Args:
@@ -196,10 +197,18 @@ def load_fineweb_fixed_length(n, tokenizer, seq_len=5, seed=42):
         tokenizer: GPT-2 tokenizer
         seq_len: Exact token length for all sequences
         seed: Random seed for shuffling
+        cache_dir: Directory to check for cached token files
 
     Returns:
         token_ids_list: list of n tensors, each [seq_len]
     """
+    import os
+    cache_file = os.path.join(cache_dir, f"fineweb_n{n}_seq{seq_len}_seed{seed}.pt")
+    if os.path.exists(cache_file):
+        token_ids_list = torch.load(cache_file, weights_only=True)
+        print(f"Loaded {len(token_ids_list)} cached FineWeb samples from {cache_file}")
+        return token_ids_list
+
     dataset = load_dataset(
         "HuggingFaceFW/fineweb-edu",
         name="sample-10BT",
