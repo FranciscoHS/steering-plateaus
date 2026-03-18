@@ -35,16 +35,57 @@ def get_activations(model, tokenizer, texts, layer, device, batch_size=32):
     return torch.cat(all_acts, dim=0)
 
 
+def reconstruct_omp_gpu(dictionary, activations, k, device='cuda'):
+    """Batch OMP on GPU. dictionary: [n_dirs, d], activations: [N, d]."""
+    D = dictionary.to(device)  # [n_dirs, d]
+    X = activations.to(device)  # [N, d]
+    N, d = X.shape
+    n_dirs = D.shape[0]
+
+    # Precompute all projections: [N, n_dirs]
+    projections = X @ D.T
+
+    # Greedy OMP: pick top-k one at a time with residual updates
+    selected = torch.zeros(N, k, dtype=torch.long, device=device)
+    coeffs = torch.zeros(N, k, device=device)
+    residuals = X.clone()
+
+    for step in range(k):
+        # Correlations of residuals with all directions
+        corr = (residuals @ D.T).abs()  # [N, n_dirs]
+        # Mask already selected
+        for s in range(step):
+            corr.scatter_(1, selected[:, s:s+1], 0.0)
+        # Pick best
+        selected[:, step] = corr.argmax(dim=1)
+
+        # Solve least squares for selected directions so far
+        # Gather selected directions: [N, step+1, d]
+        idx = selected[:, :step+1]  # [N, step+1]
+        D_sel = D[idx]  # [N, step+1, d]
+
+        # Batch least squares: c = (G + eps*I)^-1 @ D_sel @ x
+        # D_sel: [N, step+1, d], X: [N, d]
+        gram = D_sel @ D_sel.transpose(1, 2)  # [N, step+1, step+1]
+        gram += 1e-6 * torch.eye(step + 1, device=device).unsqueeze(0)
+        rhs = (D_sel @ X.unsqueeze(2)).squeeze(2)  # [N, step+1]
+        c = torch.linalg.solve(gram, rhs)  # [N, step+1]
+
+        # Update residuals
+        recon = (c.unsqueeze(2) * D_sel).sum(dim=1)  # [N, d]
+        residuals = X - recon
+
+    return recon.cpu()
+
+
 def reconstruct_omp_batch(dictionary, activations, k, batch_size=500):
-    """OMP reconstruction in batches."""
-    D = dictionary.numpy().T  # [d_model, n_dirs]
+    """OMP reconstruction in batches (GPU)."""
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     all_recon = []
     for i in range(0, len(activations), batch_size):
-        batch = activations[i:i+batch_size].numpy()
-        omp = OrthogonalMatchingPursuit(n_nonzero_coefs=k, fit_intercept=False)
-        omp.fit(D, batch.T)
-        recon = omp.coef_ @ dictionary.numpy()
-        all_recon.append(torch.from_numpy(recon).float())
+        batch = activations[i:i+batch_size]
+        recon = reconstruct_omp_gpu(dictionary, batch, k, device)
+        all_recon.append(recon)
     return torch.cat(all_recon, dim=0)
 
 
