@@ -27,8 +27,8 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from src.model import (
-    load_model, forward_from_layer_to_layer, forward_from_layer_to_final,
-    _get_blocks,
+    load_model, forward_from_layer, forward_from_layer_to_layer,
+    forward_from_layer_to_final, _get_blocks, _get_final_norm, _get_lm_head,
 )
 from src.data import load_fineweb_fixed_length
 
@@ -58,14 +58,53 @@ def forward_to_L(model, ctx, a_pert_batch, inject_layer, measure_layer):
     return out.float()
 
 
+def forward_to_logits(model, ctx, a_pert_batch, inject_layer):
+    """Forward from inject_layer all the way to logits. a_pert_batch: [batch, d_model]"""
+    model_dtype = next(model.parameters()).dtype
+    ctx_d = ctx.to(dtype=model_dtype)
+    point = a_pert_batch.to(dtype=model_dtype).unsqueeze(1)  # [batch, 1, d]
+    logits = forward_from_layer(model, ctx_d, point, inject_layer)
+    return logits.float()
+
+
+def compute_reward(reward_type, model, ctx, a_pert_batch, ref_L, ref_logits,
+                   inject_layer, measure_layer):
+    """Compute reward for a batch of perturbed activations.
+
+    Args:
+        reward_type: 'l2', 'cos_dist', or 'kl_div'
+        ref_L: reference hidden state at measure_layer [1, d]
+        ref_logits: reference log-probs [1, vocab] (only needed for kl_div)
+    Returns:
+        rewards: [batch] tensor (higher = more plateau-breaking)
+    """
+    if reward_type == 'kl_div':
+        pert_logits = forward_to_logits(model, ctx, a_pert_batch, inject_layer)
+        pert_log_probs = F.log_softmax(pert_logits, dim=-1)
+        ref_probs = ref_logits.exp()
+        kl = (ref_probs * (ref_logits - pert_log_probs)).sum(dim=-1)
+        return kl
+    else:
+        pert_L = forward_to_L(model, ctx, a_pert_batch, inject_layer, measure_layer)
+        if reward_type == 'cos_dist':
+            return 1 - F.cosine_similarity(ref_L, pert_L, dim=-1)
+        else:  # l2
+            return (ref_L - pert_L).norm(dim=-1)
+
+
 def capped_melbo_one_direction(model, ctx, act, ref_L, a_unit, a_norm,
                                 angle_rad, target_cos, prev_directions,
                                 inject_layer, measure_layer, device, d_model,
-                                n_steps=300, lr=0.01, n_restarts=3):
+                                n_steps=300, lr=0.01, n_restarts=3,
+                                uncapped=False, reward_type='l2',
+                                ref_logits=None):
     """Find one direction via capped MELBO, orthogonalized to prev_directions.
 
     Optimizes n_restarts candidates in parallel (batched forward passes)
     with early stopping per candidate.
+
+    reward_type: 'l2', 'cos_dist', or 'kl_div' (only used when uncapped=True)
+    ref_logits: reference log-probs [1, vocab] (needed for kl_div)
     """
     cos_theta = np.cos(angle_rad)
     sin_theta = np.sin(angle_rad)
@@ -85,6 +124,7 @@ def capped_melbo_one_direction(model, ctx, act, ref_L, a_unit, a_norm,
     # Expand ctx for batch: [1, seq-1, d] -> [B, seq-1, d]
     ctx_batch = ctx.expand(B, -1, -1)
     ref_L_batch = ref_L.expand(B, -1)
+    ref_logits_batch = ref_logits.expand(B, -1) if ref_logits is not None else None
 
     # Early stopping state per candidate
     early_stop_patience = 50
@@ -111,10 +151,22 @@ def capped_melbo_one_direction(model, ctx, act, ref_L, a_unit, a_norm,
 
         # Batched perturbation: [B, d_model]
         a_pert = a_norm * (cos_theta * a_unit.unsqueeze(0) + sin_theta * d)
-        pert_L = forward_to_L(model, ctx_batch, a_pert, inject_layer, measure_layer)
 
-        cos_dist = 1 - F.cosine_similarity(ref_L_batch, pert_L, dim=-1)  # [B]
-        rewards = cos_dist * torch.exp(-cos_dist / target_cos)  # [B]
+        if uncapped:
+            rewards = compute_reward(reward_type, model, ctx_batch, a_pert,
+                                     ref_L_batch, ref_logits_batch,
+                                     inject_layer, measure_layer)
+            # Also get cos_dist for logging
+            if reward_type != 'cos_dist':
+                with torch.no_grad():
+                    pert_L = forward_to_L(model, ctx_batch, a_pert, inject_layer, measure_layer)
+                    cos_dist = 1 - F.cosine_similarity(ref_L_batch, pert_L, dim=-1)
+            else:
+                cos_dist = rewards
+        else:
+            pert_L = forward_to_L(model, ctx_batch, a_pert, inject_layer, measure_layer)
+            cos_dist = 1 - F.cosine_similarity(ref_L_batch, pert_L, dim=-1)  # [B]
+            rewards = cos_dist * torch.exp(-cos_dist / target_cos)  # [B]
 
         # Only backprop active candidates
         loss = -(rewards * active.float()).sum()
@@ -167,7 +219,8 @@ def capped_melbo_one_direction(model, ctx, act, ref_L, a_unit, a_norm,
 def refine_in_cone(model, ctx, act, ref_L, a_unit, a_norm,
                    d_start, max_drift_deg, angle_rad,
                    inject_layer, measure_layer, device, d_model,
-                   n_steps=200, lr=0.01, n_restarts=3):
+                   n_steps=200, lr=0.01, n_restarts=3,
+                   reward_type='cos_dist', ref_logits=None):
     """Refine a direction within a cone of max_drift_deg around d_start."""
     cos_theta = np.cos(angle_rad)
     sin_theta = np.sin(angle_rad)
@@ -198,13 +251,11 @@ def refine_in_cone(model, ctx, act, ref_L, a_unit, a_norm,
             d = d / (d.norm() + 1e-10)
 
             a_pert = a_norm * (cos_theta * a_unit + sin_theta * d)
-            pert_L = forward_to_L(model, ctx, a_pert.unsqueeze(0),
-                                  inject_layer, measure_layer)
+            reward = compute_reward(reward_type, model, ctx, a_pert.unsqueeze(0),
+                                    ref_L, ref_logits, inject_layer, measure_layer)
+            reward = reward.squeeze()
 
-            cos_dist = 1 - F.cosine_similarity(ref_L, pert_L, dim=-1)
-            cos_dist = cos_dist.squeeze()
-
-            loss = -cos_dist
+            loss = -reward
             loss.backward()
             optimizer.step()
 
@@ -220,7 +271,7 @@ def refine_in_cone(model, ctx, act, ref_L, a_unit, a_norm,
                     direction.data = cos_drift_min * d_start + sin_max * d_perp
                     direction.data = F.normalize(direction.data, dim=0)
 
-        final_cd = cos_dist.item()
+        final_cd = reward.item()
         if final_cd > best_cd:
             best_cd = final_cd
             best_dir = F.normalize(direction.data.clone().detach(), dim=0)
@@ -265,7 +316,16 @@ def main():
     parser.add_argument('--max_opt_angle', type=float, default=40.0,
                         help='Stop escalating angle beyond this')
     parser.add_argument('--target_cos', type=float, default=0.1)
+    parser.add_argument('--uncapped', action='store_true',
+                        help='Use raw L2 distance as reward instead of capped cosine reward')
+    parser.add_argument('--reward_type', type=str, default='l2',
+                        choices=['l2', 'cos_dist', 'kl_div'],
+                        help='Reward type for uncapped mode (default: l2)')
     parser.add_argument('--reward_fraction', type=float, default=0.1)
+    parser.add_argument('--stop_multiplier', type=float, default=5.0,
+                        help='For --uncapped: stop when reward < multiplier * median_random_l2 (default 5.0)')
+    parser.add_argument('--n_random_baseline', type=int, default=30,
+                        help='Number of random directions to sweep for baseline (used with --uncapped)')
     parser.add_argument('--seed_directions', type=str, default=None,
                         help='Path to results.pkl; loads directions as frozen seeds for orthogonality')
 
@@ -342,8 +402,35 @@ def main():
         ref_L = forward_to_L(model, ctx, act.unsqueeze(0),
                              args.inject_layer, args.measure_layer)
 
+    # Reference logits (needed for kl_div reward)
+    ref_logits = None
+    if args.reward_type == 'kl_div':
+        with torch.no_grad():
+            ref_logits = F.log_softmax(
+                forward_to_logits(model, ctx, act.unsqueeze(0), args.inject_layer), dim=-1)
+
     current_angle = args.opt_angle
     angle_rad = np.deg2rad(current_angle)
+
+    # === Compute random baseline for uncapped stopping ===
+    uncapped_stop_threshold = None
+    if args.uncapped:
+        print(f"\nSweeping {args.n_random_baseline} random directions for baseline "
+              f"(reward_type={args.reward_type})...")
+        rand_rewards_at_angle = []
+        for i in range(args.n_random_baseline):
+            d_rand = torch.randn(d_model, device=device)
+            d_rand = d_rand - (d_rand @ a_unit) * a_unit
+            d_rand = F.normalize(d_rand, dim=0)
+            a_pert = a_norm * (np.cos(angle_rad) * a_unit + np.sin(angle_rad) * d_rand)
+            with torch.no_grad():
+                r = compute_reward(args.reward_type, model, ctx, a_pert.unsqueeze(0),
+                                   ref_L, ref_logits, args.inject_layer, args.measure_layer)
+            rand_rewards_at_angle.append(r.item())
+        median_rand = np.median(rand_rewards_at_angle)
+        uncapped_stop_threshold = args.stop_multiplier * median_rand
+        print(f"  Median random {args.reward_type} at {current_angle:.1f}°: {median_rand:.4f}")
+        print(f"  Stop threshold ({args.stop_multiplier}x): {uncapped_stop_threshold:.4f}")
 
     # === Iterative MELBO ===
     all_directions = []
@@ -382,7 +469,9 @@ def main():
                 model, ctx, act, ref_L, a_unit, a_norm,
                 angle_rad, args.target_cos, prev,
                 args.inject_layer, args.measure_layer, device, d_model,
-                n_steps=args.n_steps, lr=args.lr, n_restarts=args.n_restarts)
+                n_steps=args.n_steps, lr=args.lr, n_restarts=args.n_restarts,
+                uncapped=args.uncapped, reward_type=args.reward_type,
+                ref_logits=ref_logits)
 
             if best_reward_ever is None or reward > best_reward_ever:
                 best_reward_ever = reward
@@ -390,7 +479,12 @@ def main():
             print(f"    reward={reward:.6f}, cos_dist={history[-1][1]:.4f}, "
                   f"ratio={reward/best_reward_ever:.3f}")
 
-            if reward < args.reward_fraction * best_reward_ever:
+            if args.uncapped and uncapped_stop_threshold is not None:
+                if reward < uncapped_stop_threshold:
+                    print(f"    Reward {reward:.1f} below {args.stop_multiplier}x median random "
+                          f"({uncapped_stop_threshold:.1f}), stopping round")
+                    break
+            elif reward < args.reward_fraction * best_reward_ever:
                 print(f"    Reward dropped below {args.reward_fraction:.0%} of "
                       f"best ever ({best_reward_ever:.6f}), stopping round")
                 break
@@ -424,6 +518,21 @@ def main():
                 angle_rad = np.deg2rad(current_angle)
                 best_reward_ever = None  # reset for new angle
                 print(f"  Escalating to opt_angle={current_angle:.1f}°")
+                # Recompute baseline at new angle
+                if args.uncapped:
+                    rand_rewards_at_angle = []
+                    for i in range(args.n_random_baseline):
+                        d_rand = torch.randn(d_model, device=device)
+                        d_rand = d_rand - (d_rand @ a_unit) * a_unit
+                        d_rand = F.normalize(d_rand, dim=0)
+                        a_pert = a_norm * (np.cos(angle_rad) * a_unit + np.sin(angle_rad) * d_rand)
+                        with torch.no_grad():
+                            r = compute_reward(args.reward_type, model, ctx, a_pert.unsqueeze(0),
+                                               ref_L, ref_logits, args.inject_layer, args.measure_layer)
+                        rand_rewards_at_angle.append(r.item())
+                    median_rand = np.median(rand_rewards_at_angle)
+                    uncapped_stop_threshold = args.stop_multiplier * median_rand
+                    print(f"  New baseline: median={median_rand:.4f}, threshold={uncapped_stop_threshold:.4f}")
                 round_logs.append(round_info)
                 continue
             else:
@@ -435,12 +544,14 @@ def main():
         print(f"\n  --- Local optimization (drift cap={args.max_drift}°) ---")
         refined_directions = []
         for i, d_start in enumerate(new_directions):
+            refine_rt = args.reward_type if args.uncapped else 'cos_dist'
             refined, cd, drift = refine_in_cone(
                 model, ctx, act, ref_L, a_unit, a_norm,
                 d_start, args.max_drift, angle_rad,
                 args.inject_layer, args.measure_layer, device, d_model,
                 n_steps=args.refine_steps, lr=args.refine_lr,
-                n_restarts=args.refine_restarts)
+                n_restarts=args.refine_restarts,
+                reward_type=refine_rt, ref_logits=ref_logits)
             refined_directions.append(refined)
             print(f"    Dir {i+1}: cd {round_info['pre_refine'][i]['cos_dist']:.4f}"
                   f" → {cd:.4f}, drift={drift:.1f}°")

@@ -368,6 +368,18 @@ PROMPT_SETS = [
         'lisp': "(defun matrix-multiply (a b)",
         'haskell': "matrixMultiply :: [[Int]] -> [[Int]] -> [[Int]]\nmatrixMultiply a b =",
     },
+    {
+        'python': "def zip_lists(a, b):",
+        'javascript': "function zipLists(a, b) {",
+        'java': "public static List<int[]> zipLists(int[] a, int[] b) {",
+        'c': "void zip_lists(int* a, int* b, int n, int** result) {",
+        'go': "func zipLists(a, b []int) [][2]int {",
+        'rust': "fn zip_lists(a: &[i32], b: &[i32]) -> Vec<(i32, i32)> {",
+        'php': "function zipLists($a, $b) {",
+        'typescript': "function zipLists(a: number[], b: number[]): [number, number][] {",
+        'lisp': "(defun zip-lists (a b)",
+        'haskell': "zipLists :: [a] -> [b] -> [(a, b)]\nzipLists xs ys =",
+    },
 ]
 
 # Number of prompt sets

@@ -30,6 +30,9 @@ MODEL_ALIASES = {
     'dense_csp_4x': 'dense1_4x',
     'deepseek-r1-distill-qwen-7b': 'deepseek-ai/DeepSeek-R1-Distill-Qwen-7B',
     'llama-3.1-8b': 'meta-llama/Llama-3.1-8B',
+    'pythia-1.4b': 'EleutherAI/pythia-1.4b',
+    'olmo-1b': 'allenai/OLMo-1B-hf',
+    'olmo-7b': 'allenai/OLMo-7B-0724-hf',
     'tinystories-28m': 'roneneldan/TinyStories-28M',
     'chess_16L': 'lichess_16layers_ckpt_no_optimizer.pt',
     'chess_8L': 'lichess_8layers_ckpt_no_optimizer.pt',
@@ -46,6 +49,8 @@ def _get_blocks(model):
         return model.circuit_model.transformer.h
     if hasattr(model, 'transformer'):  # GPT-2
         return model.transformer.h
+    elif hasattr(model, 'gpt_neox'):  # GPT-NeoX (Pythia)
+        return model.gpt_neox.layers
     elif hasattr(model, 'model') and hasattr(model.model, 'layers'):  # Llama/Qwen
         return model.model.layers
     raise ValueError(f"Unknown model architecture: {type(model)}")
@@ -58,6 +63,8 @@ def _get_final_norm(model):
         return model.circuit_model.transformer.ln_f
     if hasattr(model, 'transformer'):  # GPT-2
         return model.transformer.ln_f
+    elif hasattr(model, 'gpt_neox'):  # GPT-NeoX (Pythia)
+        return model.gpt_neox.final_layer_norm
     elif hasattr(model, 'model') and hasattr(model.model, 'norm'):  # Llama/Qwen
         return model.model.norm
     raise ValueError(f"Unknown model architecture: {type(model)}")
@@ -92,7 +99,12 @@ def _get_position_embeddings(model, hidden_states):
         global_emb = model.model.rotary_emb(hidden_states, position_ids)
         local_emb = model.model.rotary_emb_local(hidden_states, position_ids)
         return (global_emb, local_emb)
-    return model.model.rotary_emb(hidden_states, position_ids)
+    if hasattr(model, 'gpt_neox'):  # GPT-NeoX (Pythia)
+        return model.gpt_neox.rotary_emb(hidden_states, position_ids)
+    if hasattr(model.model, 'rotary_emb'):
+        return model.model.rotary_emb(hidden_states, position_ids)
+    # Fallback: rotary_emb lives per-layer (e.g. Gemma2 in transformers ≤4.44)
+    return model.model.layers[0].self_attn.rotary_emb(hidden_states, position_ids)
 
 
 def _is_cat_pos_emb_model(model):
@@ -124,7 +136,17 @@ def _run_block(block, hidden, model, pos_emb=None):
         result = block(hidden, position_embeddings_global=global_emb,
                        position_embeddings_local=local_emb)
     elif model_type == 'llama':
-        result = block(hidden, position_embeddings=pos_emb)
+        # position_embeddings kwarg available in transformers ≥4.47;
+        # older versions compute RoPE internally and need position_ids instead
+        if not hasattr(model, '_uses_position_embeddings'):
+            import inspect
+            model._uses_position_embeddings = (
+                'position_embeddings' in inspect.signature(block.forward).parameters)
+        if model._uses_position_embeddings:
+            result = block(hidden, position_embeddings=pos_emb)
+        else:
+            position_ids = torch.arange(hidden.shape[1], device=hidden.device).unsqueeze(0)
+            result = block(hidden, position_ids=position_ids)
     elif model_type == 'circuitgpt' and pos_emb is not None:
         # BlockCatPosEmb.forward(x, pos_emb_to_cat)
         result = block(hidden, pos_emb)
@@ -263,8 +285,10 @@ def load_model(model_name='gpt2', device=None, dtype=None):
         config_type = getattr(model.config, 'model_type', '')
         if config_type.startswith('gemma3'):
             model_type = 'gemma3'
-        elif config_type in ('gpt_neo', 'gpt_neox'):
+        elif config_type == 'gpt_neo':
             model_type = 'gpt2'  # GPT-Neo has identical structure to GPT-2
+        elif config_type == 'gpt_neox':
+            model_type = 'llama'  # GPT-NeoX (Pythia) uses rotary embeddings like Llama
         else:
             model_type = 'llama'  # Llama-architecture (Qwen3, Llama, Gemma 1/2, etc.)
         d_model = model.config.hidden_size
