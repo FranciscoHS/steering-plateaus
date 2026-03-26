@@ -97,7 +97,8 @@ def capped_melbo_one_direction(model, ctx, act, ref_L, a_unit, a_norm,
                                 inject_layer, measure_layer, device, d_model,
                                 n_steps=300, lr=0.01, n_restarts=3,
                                 uncapped=False, reward_type='l2',
-                                ref_logits=None):
+                                ref_logits=None, additive=False,
+                                opt_magnitude=None):
     """Find one direction via capped MELBO, orthogonalized to prev_directions.
 
     Optimizes n_restarts candidates in parallel (batched forward passes)
@@ -105,6 +106,8 @@ def capped_melbo_one_direction(model, ctx, act, ref_L, a_unit, a_norm,
 
     reward_type: 'l2', 'cos_dist', or 'kl_div' (only used when uncapped=True)
     ref_logits: reference log-probs [1, vocab] (needed for kl_div)
+    additive: if True, perturb as act + magnitude * d instead of spherical rotation
+    opt_magnitude: magnitude for additive mode
     """
     cos_theta = np.cos(angle_rad)
     sin_theta = np.sin(angle_rad)
@@ -113,7 +116,8 @@ def capped_melbo_one_direction(model, ctx, act, ref_L, a_unit, a_norm,
     # Initialize B random directions
     directions = torch.randn(B, d_model, device=device)
     for b in range(B):
-        directions[b] -= (directions[b] @ a_unit) * a_unit
+        if not additive:
+            directions[b] -= (directions[b] @ a_unit) * a_unit
         for pd in prev_directions:
             directions[b] -= (directions[b] @ pd) * pd
         directions[b] = F.normalize(directions[b], dim=0)
@@ -144,13 +148,17 @@ def capped_melbo_one_direction(model, ctx, act, ref_L, a_unit, a_norm,
 
         # Normalize and orthogonalize all candidates
         d = directions / directions.norm(dim=1, keepdim=True)
-        d = d - (d @ a_unit).unsqueeze(1) * a_unit.unsqueeze(0)
+        if not additive:
+            d = d - (d @ a_unit).unsqueeze(1) * a_unit.unsqueeze(0)
         for pd in prev_directions:
             d = d - (d @ pd).unsqueeze(1) * pd.unsqueeze(0)
         d = d / (d.norm(dim=1, keepdim=True) + 1e-10)
 
         # Batched perturbation: [B, d_model]
-        a_pert = a_norm * (cos_theta * a_unit.unsqueeze(0) + sin_theta * d)
+        if additive:
+            a_pert = act.unsqueeze(0) + opt_magnitude * d
+        else:
+            a_pert = a_norm * (cos_theta * a_unit.unsqueeze(0) + sin_theta * d)
 
         if uncapped:
             rewards = compute_reward(reward_type, model, ctx_batch, a_pert,
@@ -181,7 +189,8 @@ def capped_melbo_one_direction(model, ctx, act, ref_L, a_unit, a_norm,
 
         # Project back
         with torch.no_grad():
-            directions.data -= (directions.data @ a_unit).unsqueeze(1) * a_unit.unsqueeze(0)
+            if not additive:
+                directions.data -= (directions.data @ a_unit).unsqueeze(1) * a_unit.unsqueeze(0)
             for pd in prev_directions:
                 directions.data -= (directions.data @ pd).unsqueeze(1) * pd.unsqueeze(0)
 
@@ -200,7 +209,8 @@ def capped_melbo_one_direction(model, ctx, act, ref_L, a_unit, a_norm,
                 if rewards[b].item() > best_reward:
                     best_reward = rewards[b].item()
                     d_final = directions[b].data / directions[b].data.norm()
-                    d_final = d_final - (d_final @ a_unit) * a_unit
+                    if not additive:
+                        d_final = d_final - (d_final @ a_unit) * a_unit
                     for pd in prev_directions:
                         d_final = d_final - (d_final @ pd) * pd
                     d_final = d_final / d_final.norm()
@@ -281,16 +291,24 @@ def refine_in_cone(model, ctx, act, ref_L, a_unit, a_norm,
 
 
 def sweep_dir(model, ctx, act, ref_L, a_unit, a_norm, d_vec,
-              inject_layer, measure_layer, device, angles_deg):
-    """Sweep a direction across angles, return cosine distance and L2 arrays."""
+              inject_layer, measure_layer, device, angles_deg,
+              additive=False):
+    """Sweep a direction across angles, return cosine distance and L2 arrays.
+
+    If additive=True, perturbs as act + a_norm*sin(θ)*d (no orthogonalization).
+    """
     angles_rad = np.deg2rad(angles_deg)
     cos_t = torch.tensor(np.cos(angles_rad), dtype=torch.float32, device=device)
     sin_t = torch.tensor(np.sin(angles_rad), dtype=torch.float32, device=device)
 
     d = d_vec.to(device).float()
-    d = d - (d @ a_unit) * a_unit
-    d = F.normalize(d, dim=0)
-    perturbed = a_norm * (cos_t[:, None] * a_unit[None] + sin_t[:, None] * d[None])
+    if additive:
+        d = F.normalize(d, dim=0)
+        perturbed = act.unsqueeze(0) + (a_norm * sin_t)[:, None] * d[None]
+    else:
+        d = d - (d @ a_unit) * a_unit
+        d = F.normalize(d, dim=0)
+        perturbed = a_norm * (cos_t[:, None] * a_unit[None] + sin_t[:, None] * d[None])
     with torch.no_grad():
         pert_L = forward_to_L(model, ctx, perturbed, inject_layer, measure_layer)
         cos_dist = (1 - F.cosine_similarity(ref_L, pert_L, dim=-1)).cpu().numpy()
@@ -306,6 +324,8 @@ def main():
     parser.add_argument('--seq_len', type=int, default=5)
     parser.add_argument('--act_idx', type=int, default=0,
                         help='Which activation to use (index into FineWeb samples)')
+    parser.add_argument('--custom_prompt', type=str, default=None,
+                        help='Use a custom prompt instead of FineWeb sample (e.g. "My favorite thing is")')
     parser.add_argument('--n_load', type=int, default=100,
                         help='Number of FineWeb sequences to load')
 
@@ -316,6 +336,10 @@ def main():
     parser.add_argument('--max_opt_angle', type=float, default=40.0,
                         help='Stop escalating angle beyond this')
     parser.add_argument('--target_cos', type=float, default=0.1)
+    parser.add_argument('--additive', action='store_true',
+                        help='Use additive perturbation (a + mag*d) instead of spherical rotation')
+    parser.add_argument('--opt_magnitude', type=float, default=None,
+                        help='Perturbation magnitude for additive mode (default: a_norm * sin(opt_angle))')
     parser.add_argument('--uncapped', action='store_true',
                         help='Use raw L2 distance as reward instead of capped cosine reward')
     parser.add_argument('--reward_type', type=str, default='l2',
@@ -335,6 +359,8 @@ def main():
     parser.add_argument('--lr', type=float, default=0.01)
 
     # Local opt config
+    parser.add_argument('--skip_refine', action='store_true',
+                        help='Skip local refinement phase')
     parser.add_argument('--refine_steps', type=int, default=200)
     parser.add_argument('--refine_restarts', type=int, default=3)
     parser.add_argument('--max_drift', type=float, default=5.0)
@@ -345,6 +371,8 @@ def main():
     parser.add_argument('--n_sweep_angles', type=int, default=60)
     parser.add_argument('--n_rand', type=int, default=20)
 
+    parser.add_argument('--max_directions', type=int, default=0,
+                        help='Stop after finding this many directions (0=unlimited)')
     parser.add_argument('--ckpt_every', type=int, default=10)
     parser.add_argument('--results_dir', type=str, default=None)
     parser.add_argument('--seed', type=int, default=42)
@@ -358,9 +386,15 @@ def main():
     np.random.seed(args.seed)
 
     if args.results_dir is None:
+        if args.custom_prompt is not None:
+            prompt_slug = args.custom_prompt[:30].replace(' ', '_').replace('/', '_')
+            act_tag = f'_prompt-{prompt_slug}'
+        else:
+            act_tag = f'_act{args.act_idx}'
+        add_tag = '_additive' if args.additive else ''
         args.results_dir = (f'results/iterative_melbo_hf/{args.model}'
                            f'_L{args.inject_layer}_meas{args.measure_layer}'
-                           f'_angle{args.opt_angle}')
+                           f'_angle{args.opt_angle}{act_tag}{add_tag}')
     os.makedirs(args.results_dir, exist_ok=True)
 
     # Load model
@@ -378,18 +412,30 @@ def main():
           f"measure_layer: {args.measure_layer}")
 
     # Load data and extract activation
-    print(f"Loading {args.n_load} FineWeb sequences...")
-    token_ids_list = load_fineweb_fixed_length(args.n_load, tokenizer,
-                                                seq_len=args.seq_len, seed=args.seed)
-    print(f"Extracting layer-{args.inject_layer} activations...")
-    all_contexts, all_activations = extract_context_and_activation(
-        model, tokenizer, token_ids_list, args.inject_layer, device)
+    if args.custom_prompt is not None:
+        print(f"Using custom prompt: {args.custom_prompt!r}")
+        tokens = tokenizer.encode(args.custom_prompt, return_tensors='pt').to(device)
+        with torch.no_grad():
+            outputs = model(tokens, output_hidden_states=True)
+            hidden = outputs.hidden_states[args.inject_layer + 1]
+        ctx = hidden[:, :-1, :].float()   # [1, seq-1, d]
+        act = hidden[0, -1, :].float()    # [d]
+        a_norm = act.norm()
+        a_unit = act / a_norm
+        print(f"Custom prompt tokens: {tokens.shape[1]}, activation norm: {a_norm:.2f}")
+    else:
+        print(f"Loading {args.n_load} FineWeb sequences...")
+        token_ids_list = load_fineweb_fixed_length(args.n_load, tokenizer,
+                                                    seq_len=args.seq_len, seed=args.seed)
+        print(f"Extracting layer-{args.inject_layer} activations...")
+        all_contexts, all_activations = extract_context_and_activation(
+            model, tokenizer, token_ids_list, args.inject_layer, device)
 
-    ctx = all_contexts[args.act_idx].unsqueeze(0).to(device)  # [1, seq-1, d]
-    act = all_activations[args.act_idx].to(device)             # [d]
-    a_norm = act.norm()
-    a_unit = act / a_norm
-    print(f"Using activation {args.act_idx}, norm: {a_norm:.2f}")
+        ctx = all_contexts[args.act_idx].unsqueeze(0).to(device)  # [1, seq-1, d]
+        act = all_activations[args.act_idx].to(device)             # [d]
+        a_norm = act.norm()
+        a_unit = act / a_norm
+        print(f"Using activation {args.act_idx}, norm: {a_norm:.2f}")
 
     # Reseed for optimization if opt_seed specified
     if args.opt_seed is not None:
@@ -412,6 +458,17 @@ def main():
     current_angle = args.opt_angle
     angle_rad = np.deg2rad(current_angle)
 
+    # Compute additive magnitude (same L2 displacement as spherical at opt_angle)
+    if args.additive:
+        if args.opt_magnitude is not None:
+            additive_magnitude = args.opt_magnitude
+        else:
+            additive_magnitude = (a_norm * np.sin(angle_rad)).item()
+        print(f"Additive mode: magnitude={additive_magnitude:.4f} "
+              f"(a_norm={a_norm:.2f}, angle={current_angle}°)")
+    else:
+        additive_magnitude = None
+
     # === Compute random baseline for uncapped stopping ===
     uncapped_stop_threshold = None
     if args.uncapped:
@@ -420,9 +477,13 @@ def main():
         rand_rewards_at_angle = []
         for i in range(args.n_random_baseline):
             d_rand = torch.randn(d_model, device=device)
-            d_rand = d_rand - (d_rand @ a_unit) * a_unit
+            if not args.additive:
+                d_rand = d_rand - (d_rand @ a_unit) * a_unit
             d_rand = F.normalize(d_rand, dim=0)
-            a_pert = a_norm * (np.cos(angle_rad) * a_unit + np.sin(angle_rad) * d_rand)
+            if args.additive:
+                a_pert = act + additive_magnitude * d_rand
+            else:
+                a_pert = a_norm * (np.cos(angle_rad) * a_unit + np.sin(angle_rad) * d_rand)
             with torch.no_grad():
                 r = compute_reward(args.reward_type, model, ctx, a_pert.unsqueeze(0),
                                    ref_L, ref_logits, args.inject_layer, args.measure_layer)
@@ -471,13 +532,18 @@ def main():
                 args.inject_layer, args.measure_layer, device, d_model,
                 n_steps=args.n_steps, lr=args.lr, n_restarts=args.n_restarts,
                 uncapped=args.uncapped, reward_type=args.reward_type,
-                ref_logits=ref_logits)
+                ref_logits=ref_logits, additive=args.additive,
+                opt_magnitude=additive_magnitude)
 
             if best_reward_ever is None or reward > best_reward_ever:
                 best_reward_ever = reward
 
             print(f"    reward={reward:.6f}, cos_dist={history[-1][1]:.4f}, "
                   f"ratio={reward/best_reward_ever:.3f}")
+
+            if args.max_directions > 0 and (len(all_directions) + len(new_directions) + 1) > args.max_directions:
+                print(f"    Reached max_directions={args.max_directions}, stopping")
+                break
 
             if args.uncapped and uncapped_stop_threshold is not None:
                 if reward < uncapped_stop_threshold:
@@ -512,6 +578,11 @@ def main():
         n_new = len(new_directions)
         print(f"\n  Round {rnd}: found {n_new} directions")
 
+        if args.max_directions > 0 and len(all_directions) + n_new >= args.max_directions:
+            # Trim to max_directions
+            new_directions = new_directions[:args.max_directions - len(all_directions)]
+            n_new = len(new_directions)
+
         if n_new == 0:
             if args.angle_step > 0 and current_angle + args.angle_step <= args.max_opt_angle:
                 current_angle += args.angle_step
@@ -523,9 +594,13 @@ def main():
                     rand_rewards_at_angle = []
                     for i in range(args.n_random_baseline):
                         d_rand = torch.randn(d_model, device=device)
-                        d_rand = d_rand - (d_rand @ a_unit) * a_unit
+                        if not args.additive:
+                            d_rand = d_rand - (d_rand @ a_unit) * a_unit
                         d_rand = F.normalize(d_rand, dim=0)
-                        a_pert = a_norm * (np.cos(angle_rad) * a_unit + np.sin(angle_rad) * d_rand)
+                        if args.additive:
+                            a_pert = act + additive_magnitude * d_rand
+                        else:
+                            a_pert = a_norm * (np.cos(angle_rad) * a_unit + np.sin(angle_rad) * d_rand)
                         with torch.no_grad():
                             r = compute_reward(args.reward_type, model, ctx, a_pert.unsqueeze(0),
                                                ref_L, ref_logits, args.inject_layer, args.measure_layer)
@@ -541,26 +616,35 @@ def main():
                 break
 
         # Phase 2: Refine
-        print(f"\n  --- Local optimization (drift cap={args.max_drift}°) ---")
-        refined_directions = []
-        for i, d_start in enumerate(new_directions):
-            refine_rt = args.reward_type if args.uncapped else 'cos_dist'
-            refined, cd, drift = refine_in_cone(
-                model, ctx, act, ref_L, a_unit, a_norm,
-                d_start, args.max_drift, angle_rad,
-                args.inject_layer, args.measure_layer, device, d_model,
-                n_steps=args.refine_steps, lr=args.refine_lr,
-                n_restarts=args.refine_restarts,
-                reward_type=refine_rt, ref_logits=ref_logits)
-            refined_directions.append(refined)
-            print(f"    Dir {i+1}: cd {round_info['pre_refine'][i]['cos_dist']:.4f}"
-                  f" → {cd:.4f}, drift={drift:.1f}°")
-            round_info['post_refine'].append({
-                'cd': cd, 'drift': drift,
-                'direction': refined.cpu(),
-            })
-
-        all_directions.extend(refined_directions)
+        if args.skip_refine:
+            print(f"\n  --- Skipping local refinement ---")
+            for i, d_start in enumerate(new_directions):
+                round_info['post_refine'].append({
+                    'cd': round_info['pre_refine'][i]['cos_dist'],
+                    'drift': 0.0,
+                    'direction': d_start.cpu(),
+                })
+            all_directions.extend(new_directions)
+        else:
+            print(f"\n  --- Local optimization (drift cap={args.max_drift}°) ---")
+            refined_directions = []
+            for i, d_start in enumerate(new_directions):
+                refine_rt = args.reward_type if args.uncapped else 'cos_dist'
+                refined, cd, drift = refine_in_cone(
+                    model, ctx, act, ref_L, a_unit, a_norm,
+                    d_start, args.max_drift, angle_rad,
+                    args.inject_layer, args.measure_layer, device, d_model,
+                    n_steps=args.refine_steps, lr=args.refine_lr,
+                    n_restarts=args.refine_restarts,
+                    reward_type=refine_rt, ref_logits=ref_logits)
+                refined_directions.append(refined)
+                print(f"    Dir {i+1}: cd {round_info['pre_refine'][i]['cos_dist']:.4f}"
+                      f" → {cd:.4f}, drift={drift:.1f}°")
+                round_info['post_refine'].append({
+                    'cd': cd, 'drift': drift,
+                    'direction': refined.cpu(),
+                })
+            all_directions.extend(refined_directions)
         round_logs.append(round_info)
 
         # Checkpoint
@@ -599,7 +683,11 @@ def main():
             pickle.dump(results, f)
         return
 
-    angles_deg = np.linspace(0, args.max_sweep_angle, args.n_sweep_angles + 1)[1:]
+    # Log-spaced sweep for small opt_angle (fine resolution near 0), linear otherwise
+    if args.opt_angle < 1.0:
+        angles_deg = np.geomspace(0.01, args.max_sweep_angle, args.n_sweep_angles)
+    else:
+        angles_deg = np.linspace(0, args.max_sweep_angle, args.n_sweep_angles + 1)[1:]
 
     print("\nSweeping MELBO directions...")
     melbo_cos = np.zeros((n_total, len(angles_deg)))
@@ -607,7 +695,8 @@ def main():
     for i, d in enumerate(all_directions):
         melbo_cos[i], melbo_l2[i] = sweep_dir(
             model, ctx, act, ref_L, a_unit, a_norm, d,
-            args.inject_layer, args.measure_layer, device, angles_deg)
+            args.inject_layer, args.measure_layer, device, angles_deg,
+            additive=args.additive)
 
     print("Sweeping random directions...")
     rand_dirs = F.normalize(torch.randn(args.n_rand, d_model), dim=-1)
@@ -617,7 +706,8 @@ def main():
         rand_cos[k], rand_l2[k] = sweep_dir(
             model, ctx, act, ref_L, a_unit, a_norm,
             rand_dirs[k], args.inject_layer,
-            args.measure_layer, device, angles_deg)
+            args.measure_layer, device, angles_deg,
+            additive=args.additive)
 
     # Build round_boundaries
     round_boundaries = []

@@ -186,7 +186,8 @@ def main():
     # Step 2: Draw random directions from the subspace
     print(f"\nDrawing {args.n_random} random directions from {args.k}-d subspace...")
     # QR for orthonormal basis of the subspace
-    Q, _ = torch.linalg.qr(dirs_orth.T, mode='reduced')  # [d_model, rank]
+    Q, _ = torch.linalg.qr(dirs_orth.T.cpu(), mode='reduced')  # [d_model, rank]
+    Q = Q.to(device)
     rank = Q.shape[1]
     print(f"  Subspace rank: {rank}")
 

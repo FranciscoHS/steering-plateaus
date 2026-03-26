@@ -4,14 +4,15 @@ Spherical perturbation sweep: random directions vs feature directions.
 
 For each real activation, perturbs along:
   (i)   random orthogonal directions (baseline)
-  (ii)  C programming feature direction
-  (iii) RU language feature direction
-  (iv)  C+RU combined direction (normalized sum)
+  (ii)  named feature directions (loaded from contrastive results or --direction_pkl)
 
 Measures KL divergence at each angle. Plots all conditions on one figure.
 
 Usage:
     python scripts/perturbation/run_feature_vs_random_sweep.py
+    python scripts/perturbation/run_feature_vs_random_sweep.py \
+        --direction_pkl results/iterative_melbo_hf/.../results.pkl \
+        --model qwen3-1.7b --layer 7
 """
 
 import sys
@@ -133,6 +134,12 @@ def main():
     parser.add_argument('--n_angles', type=int, default=40)
     parser.add_argument('--seq_len', type=int, default=128)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--direction_pkl', type=str, default=None,
+                        help='Path to results.pkl from iterative_melbo_hf (overrides contrastive dirs)')
+    parser.add_argument('--dir_idx', type=int, default=0,
+                        help='Which direction to use from direction_pkl (default: 0)')
+    parser.add_argument('--custom_prompts', type=str, default=None,
+                        help='Pipe-separated custom prompts to use instead of FineWeb (e.g. "prompt1|prompt2")')
     parser.add_argument('--results_dir', default=None)
     args = parser.parse_args()
 
@@ -155,52 +162,80 @@ def main():
     print(f"Device: {device}")
 
     # Load feature directions
-    lang_path = f'results/allpairs_contrastive/{args.model}/directions.pkl'
-    prog_path = f'results/programming_contrastive/{args.model}/directions_6lang_with_python.pkl'
-    print(f"Loading features: {lang_path}, {prog_path}")
+    if args.direction_pkl:
+        print(f"Loading direction from {args.direction_pkl}")
+        with open(args.direction_pkl, 'rb') as f:
+            dir_data = pickle.load(f)
+        direction = dir_data['directions'][args.dir_idx].float()
+        direction = direction / direction.norm()
+        opt_angle = dir_data['args'].get('opt_angle', '?')
+        dir_label = f'MELBO (opt@{opt_angle}°)'
+        named_directions = {dir_label: direction}
+        print(f"  Direction {args.dir_idx}: opt_angle={opt_angle}°")
+    else:
+        lang_path = f'results/allpairs_contrastive/{args.model}/directions.pkl'
+        prog_path = f'results/programming_contrastive/{args.model}/directions_6lang_with_python.pkl'
+        print(f"Loading features: {lang_path}, {prog_path}")
 
-    with open(lang_path, 'rb') as f:
-        lang_data = pickle.load(f)
-    with open(prog_path, 'rb') as f:
-        prog_data = pickle.load(f)
+        with open(lang_path, 'rb') as f:
+            lang_data = pickle.load(f)
+        with open(prog_path, 'rb') as f:
+            prog_data = pickle.load(f)
 
-    ru_vec = lang_data['features']['ru'].float()
-    c_vec = prog_data['features']['c'].float()
+        ru_vec = lang_data['features']['ru'].float()
+        c_vec = prog_data['features']['c'].float()
 
-    # Combined direction: normalized sum
-    combined = ru_vec + c_vec
-    combined = combined / combined.norm()
+        combined = ru_vec + c_vec
+        combined = combined / combined.norm()
 
-    cos_rc = (ru_vec @ c_vec).item()
-    print(f"cos(RU, C) = {cos_rc:.4f}")
-    print(f"cos(RU, combined) = {(ru_vec @ combined).item():.4f}")
-    print(f"cos(C, combined) = {(c_vec @ combined).item():.4f}")
+        cos_rc = (ru_vec @ c_vec).item()
+        print(f"cos(RU, C) = {cos_rc:.4f}")
 
-    named_directions = {
-        'C': c_vec,
-        'RU': ru_vec,
-        'RU+C': combined,
-    }
+        named_directions = {
+            'C': c_vec,
+            'RU': ru_vec,
+            'RU+C': combined,
+        }
 
-    # Extract activations from FineWeb
-    print(f"\nLoading {args.n_act} FineWeb sequences (seq_len={args.seq_len})...")
-    token_ids_list = load_fineweb_fixed_length(
-        args.n_act, tokenizer, seq_len=args.seq_len, seed=args.seed
-    )
+    # Extract activations
+    if args.custom_prompts is not None:
+        prompts = [p.strip() for p in args.custom_prompts.split('|')]
+        args.n_act = len(prompts)
+        print(f"\nUsing {len(prompts)} custom prompts:")
+        for p in prompts:
+            print(f"  - {p!r}")
+        print(f"Extracting layer-{args.layer} activations...")
+        all_contexts = []
+        all_activations = []
+        for prompt in prompts:
+            tokens = tokenizer.encode(prompt, return_tensors='pt').to(device)
+            with torch.no_grad():
+                outputs = model(tokens, output_hidden_states=True)
+            hidden = outputs.hidden_states[args.layer + 1]
+            all_contexts.append(hidden[0, :-1, :].float().cpu())
+            all_activations.append(hidden[0, -1, :].float().cpu())
+        # Contexts have variable length, store as list
+        contexts = all_contexts  # list of [seq-1, d]
+        activations = torch.stack(all_activations, 0)
+    else:
+        print(f"\nLoading {args.n_act} FineWeb sequences (seq_len={args.seq_len})...")
+        token_ids_list = load_fineweb_fixed_length(
+            args.n_act, tokenizer, seq_len=args.seq_len, seed=args.seed
+        )
 
-    print(f"Extracting layer-{args.layer} activations...")
-    all_contexts = []
-    all_activations = []
-    batch_size = 4
-    for i in range(0, len(token_ids_list), batch_size):
-        batch_tokens = torch.stack(token_ids_list[i:i+batch_size]).to(device)
-        with torch.no_grad():
-            outputs = model(batch_tokens, output_hidden_states=True)
-        hidden = outputs.hidden_states[args.layer + 1]
-        all_contexts.append(hidden[:, :-1, :].float().cpu())
-        all_activations.append(hidden[:, -1, :].float().cpu())
-    contexts = torch.cat(all_contexts, 0)
-    activations = torch.cat(all_activations, 0)
+        print(f"Extracting layer-{args.layer} activations...")
+        all_contexts = []
+        all_activations = []
+        batch_size = 4
+        for i in range(0, len(token_ids_list), batch_size):
+            batch_tokens = torch.stack(token_ids_list[i:i+batch_size]).to(device)
+            with torch.no_grad():
+                outputs = model(batch_tokens, output_hidden_states=True)
+            hidden = outputs.hidden_states[args.layer + 1]
+            all_contexts.append(hidden[:, :-1, :].float().cpu())
+            all_activations.append(hidden[:, -1, :].float().cpu())
+        contexts = torch.cat(all_contexts, 0)
+        activations = torch.cat(all_activations, 0)
     print(f"Activations shape: {activations.shape}, mean norm: {activations.norm(dim=-1).mean():.2f}")
 
     # --- Run sweeps ---
@@ -245,7 +280,6 @@ def main():
     save_data = {
         'args': vars(args),
         'angles_deg': angles_deg,
-        'cos_ru_c': cos_rc,
         'kl': results_kl,
         'l2': results_l2,
     }
@@ -255,7 +289,9 @@ def main():
     print(f"Saved: {pkl_path}")
 
     # --- Plot ---
-    colors = {'C': '#4a86c8', 'RU': '#c84a5a', 'RU+C': '#7b4ac8'}
+    dir_names = list(named_directions.keys())
+    palette = ['#4a86c8', '#c84a5a', '#7b4ac8', '#4ac87b', '#c8a84a']
+    colors = {name: palette[i % len(palette)] for i, name in enumerate(dir_names)}
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
@@ -273,7 +309,7 @@ def main():
         ax.fill_between(angles_deg, rand_q25, rand_q75, color='gray', alpha=0.15)
 
         # Named directions
-        for name in ['C', 'RU', 'RU+C']:
+        for name in dir_names:
             d = metric_data[name]  # [n_act, n_angles]
             median = np.median(d, axis=0)
             q25 = np.percentile(d, 25, axis=0)
@@ -288,7 +324,7 @@ def main():
         ax.set_xlim(0, args.max_angle)
 
     fig.suptitle(f'{args.model}, layer {args.layer}: Feature vs Random Perturbation\n'
-                 f'n={args.n_act} activations, cos(RU,C)={cos_rc:.3f}',
+                 f'n={args.n_act} activations',
                  fontsize=13, y=1.02)
     plt.tight_layout()
     fig_path = os.path.join(args.results_dir, 'feature_vs_random_sweep.png')

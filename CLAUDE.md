@@ -15,31 +15,19 @@ I am Francisco, a researcher with a PhD in Quantum Info who is now working on me
 
 **Answering questions:** When Francisco asks a question, answer it directly. Don't preemptively retract or redirect — just answer. If there's a correction to make, make it after answering, not instead of answering.
 
-## Error Correction and Plateaus — Conceptual Primer
+## Remote Experiments
+When running experiments on RunPod or remote GPU pods, ALWAYS save results to files (not just stdout). Check disk space before downloading models. Never claim a file exists or was downloaded without verifying with `ls` or `cat`.
 
-**This is essential context for understanding the project. Read carefully.**
+For remote pod experiments: 1) Check disk space with `df -h` before model downloads, 2) Verify SSH connectivity before starting, 3) Run experiments on the GPU pod (not locally), 4) Check actual progress instead of giving stale status updates.
 
-When we perturb a real activation on the sphere (fixed norm) and measure the downstream response (L2 distance at final layer, or KL divergence on logits), we observe a **plateau**: small perturbations produce near-zero response, then at some angle the response sharply increases.
+Do NOT rerun or relaunch experiments without first checking if results already exist. Before starting any experiment run, check the output directory for existing results.
 
-The plateau is a robust empirical observation, replicated across many models (GPT-2, Qwen, ChessGPT, CSP) and layers.
+## General Rules
+When the user asks for specific parameters (e.g., '5 activations × 2 directions'), follow the exact specification. Do not expand scope or substitute different parameters without explicit approval. If you think Francisco's choice is bad, tell him and discuss, don't just change it independently.
 
-The **error correction hypothesis** is one proposed explanation (not established fact): the model's downstream layers have learned to be robust to noise in the residual stream. Small perturbations get "corrected" — mapped back to approximately the right output.
+When asked to iterate on a version (e.g., 'save as v7'), never overwrite the previous version. Always preserve prior versions and create the new one as specified.
 
-The key question is: how does the plateau depend on the **direction** of perturbation?
-
-**Feature directions are sensitive directions.** A feature direction (e.g., "knight on e5" in a chess model) is a direction along which the model's computation is meaningfully affected. Perturbing along a feature direction changes what the model "thinks" about the input, so it produces a large downstream response — it **breaks the plateau** at small angles.
-
-**Random directions spread energy across many features.** In high dimensions, a random direction has small components along every feature direction. Each feature gets perturbed by only ~1/√d of the total perturbation magnitude. Since each per-feature perturbation is tiny, the error correction handles all of them → the plateau is **long** for random directions.
-
-**Combining K feature directions dilutes per-feature energy.** If you perturb along normalize(d1 + d2 + ... + dk) at a fixed angle θ, the perturbation energy is split across K features, each getting ~1/√K of the total. Error correction predicts:
-- 1 feature: all energy in one sensitive direction → **shortest plateau**
-- 2 features: energy split → each gets less → **longer plateau**
-- K features: energy spread more → **even longer**
-- Random (all features): maximally spread → **longest plateau**
-
-The predicted ordering of plateau length is: **1 feature < 2 features < ... < K features < random**.
-
-**If error correction is the right explanation AND the probes are the model's true features**, this ordering must hold. If it doesn't, either (a) error correction is wrong, or (b) the probes are not the model's true computational features.
+When the user wants to discuss or interpret results, do NOT start writing code. Ask clarifying questions or engage in discussion. Only write code when implementation is requested.
 
 ## Environment & Tools
 - **Compute:** RunPod spot instances
