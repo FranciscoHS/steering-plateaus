@@ -85,6 +85,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--direction_pkl', type=str, required=True,
                         help='Path to results.pkl from iterative_melbo_hf')
+    parser.add_argument('--random_directions', action='store_true',
+                        help='Use random orthonormal directions instead of MELBO (same count)')
+    parser.add_argument('--cov_matched', action='store_true',
+                        help='Use covariance-matched random directions (sample from activation covariance, then QR)')
     parser.add_argument('--model', type=str, default=None,
                         help='Model name (default: from pkl)')
     parser.add_argument('--layer', type=int, default=None,
@@ -129,14 +133,11 @@ def main():
     model, tokenizer, device = load_model(model_name)
     d_model = model._plateau_info['d_model']
 
-    # Build direction matrix D [d_model, n_dirs]
-    D = torch.stack([d.float() for d in directions], dim=1).to(device)  # [d_model, n_dirs]
-    print(f"Direction matrix D: {D.shape}")
-
     # Load activation + context (same as MELBO used)
-    print(f"Loading {args.n_load} FineWeb sequences...")
+    n_load = max(args.n_load, 500) if args.cov_matched else args.n_load
+    print(f"Loading {n_load} FineWeb sequences...")
     token_ids_list = load_fineweb_fixed_length(
-        args.n_load, tokenizer, seq_len=args.seq_len, seed=args.seed)
+        n_load, tokenizer, seq_len=args.seq_len, seed=args.seed)
 
     print(f"Extracting layer-{layer} activations...")
     all_contexts = []
@@ -151,6 +152,35 @@ def main():
         all_activations.append(hidden[:, -1, :].float().cpu())
     all_contexts = torch.cat(all_contexts, 0)
     all_activations = torch.cat(all_activations, 0)
+
+    # Build direction matrix D [d_model, n_dirs]
+    if args.cov_matched:
+        print(f"  Using {n_dirs} COVARIANCE-MATCHED orthonormal directions")
+        print(f"  Fitting covariance from {all_activations.shape[0]} activations...")
+        # Center activations, compute covariance, eigendecompose
+        acts_centered = all_activations - all_activations.mean(dim=0)
+        cov = (acts_centered.T @ acts_centered) / acts_centered.shape[0]
+        eigenvalues, eigenvectors = torch.linalg.eigh(cov)  # ascending order
+        # Keep positive eigenvalues only
+        pos_mask = eigenvalues > 1e-8
+        eigenvalues = eigenvalues[pos_mask]
+        eigenvectors = eigenvectors[:, pos_mask]
+        print(f"  Rank: {eigenvalues.shape[0]}, top eigenvalue: {eigenvalues[-1]:.2f}, "
+              f"bottom: {eigenvalues[0]:.4f}")
+        # Sample: weight random vectors by sqrt(eigenvalues) in eigenbasis
+        rand_coeffs = torch.randn(eigenvalues.shape[0], n_dirs)
+        weighted = rand_coeffs * eigenvalues.sqrt().unsqueeze(1)  # [rank, n_dirs]
+        cov_samples = eigenvectors @ weighted  # [d_model, n_dirs]
+        D, _ = torch.linalg.qr(cov_samples)  # orthonormalize
+        D = D.to(device)
+    elif args.random_directions:
+        print(f"  Using {n_dirs} RANDOM orthonormal directions (control)")
+        rand_matrix = torch.randn(d_model, n_dirs)
+        D, _ = torch.linalg.qr(rand_matrix)  # [d_model, n_dirs], orthonormal columns
+        D = D.to(device)
+    else:
+        D = torch.stack([d.float() for d in directions], dim=1).to(device)  # [d_model, n_dirs]
+    print(f"Direction matrix D: {D.shape}")
 
     ctx = all_contexts[args.act_idx].unsqueeze(0).to(device)  # [1, seq-1, d]
     real_act = all_activations[args.act_idx].to(device)        # [d]
