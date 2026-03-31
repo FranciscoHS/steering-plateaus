@@ -30,6 +30,7 @@ MODEL_ALIASES = {
     'dense_csp_4x': 'dense1_4x',
     'deepseek-r1-distill-qwen-7b': 'deepseek-ai/DeepSeek-R1-Distill-Qwen-7B',
     'llama-3.1-8b': 'meta-llama/Llama-3.1-8B',
+    'phi-1.5': 'microsoft/phi-1_5',
     'pythia-1.4b': 'EleutherAI/pythia-1.4b',
     'olmo-1b': 'allenai/OLMo-1B-hf',
     'olmo-7b': 'allenai/OLMo-7B-0724-hf',
@@ -67,6 +68,8 @@ def _get_final_norm(model):
         return model.gpt_neox.final_layer_norm
     elif hasattr(model, 'model') and hasattr(model.model, 'norm'):  # Llama/Qwen
         return model.model.norm
+    elif hasattr(model, 'model') and hasattr(model.model, 'final_layernorm'):  # Phi
+        return model.model.final_layernorm
     raise ValueError(f"Unknown model architecture: {type(model)}")
 
 
@@ -338,6 +341,48 @@ def get_layer0_output(model, tokenizer, prompt, device):
     hidden_states = model.transformer.h[0](hidden_states)[0]
 
     return hidden_states, input_ids
+
+
+def ablate_attention(model):
+    """Register hooks to zero-ablate all attention outputs.
+
+    Zeroes the output of every self-attention module so only MLPs
+    and the residual stream contribute to the forward pass.
+
+    Returns list of hook handles (call handle.remove() to restore).
+    """
+    blocks = _get_blocks(model)
+    hooks = []
+    for block in blocks:
+        attn = getattr(block, 'self_attn', None) or getattr(block, 'attn', None)
+        def hook_fn(module, input, output):
+            if isinstance(output, tuple):
+                return (torch.zeros_like(output[0]),) + output[1:]
+            return torch.zeros_like(output)
+        hooks.append(attn.register_forward_hook(hook_fn))
+    return hooks
+
+
+def ablate_mlp(model):
+    """Register hooks to zero-ablate all MLP outputs.
+
+    Zeroes the output of every MLP module so only attention
+    and the residual stream contribute to the forward pass.
+
+    Returns list of hook handles (call handle.remove() to restore).
+    """
+    blocks = _get_blocks(model)
+    hooks = []
+    for block in blocks:
+        mlp = getattr(block, 'mlp', None)
+        if mlp is None:
+            raise ValueError(f"Cannot find MLP module in block: {type(block)}")
+        def hook_fn(module, input, output):
+            if isinstance(output, tuple):
+                return (torch.zeros_like(output[0]),) + output[1:]
+            return torch.zeros_like(output)
+        hooks.append(mlp.register_forward_hook(hook_fn))
+    return hooks
 
 
 def forward_from_layer1(model, prefix_resid, path_vectors):

@@ -30,7 +30,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from src.model import (
-    load_model, forward_from_layer_to_final,
+    load_model, forward_from_layer_to_final, forward_from_layer_to_layer,
     _get_final_norm, _get_lm_head, _get_blocks,
 )
 from src.data import load_fineweb_fixed_length
@@ -54,12 +54,12 @@ def project_orthogonal(direction, activation):
 
 
 def sweep_single_direction(model, context, activation, v_perp, angles_rad,
-                           layer, device):
+                           layer, device, measure_layer=None):
     """Sweep a single perturbation direction across angles.
 
     Returns:
         kl_divs: [n_angles] array of KL divergences
-        l2_dists: [n_angles] array of L2 distances in final-layer activation space
+        l2_dists: [n_angles] array of L2 distances (at measure_layer if set, else final layer)
     """
     n_angles = len(angles_rad)
     kl_divs = np.zeros(n_angles)
@@ -80,6 +80,10 @@ def sweep_single_direction(model, context, activation, v_perp, angles_rad,
         ref_logits = _get_lm_head(model)(ref_ln)
         ref_log_probs = F.log_softmax(ref_logits.float(), dim=-1)
         ref_probs = ref_log_probs.exp()
+        if measure_layer is not None:
+            ref_measure = forward_from_layer_to_layer(model, ctx, ref_point, layer, measure_layer)
+        else:
+            ref_measure = ref_final
 
     for ang_idx, theta in enumerate(angles_rad):
         cos_t = np.cos(theta)
@@ -89,8 +93,12 @@ def sweep_single_direction(model, context, activation, v_perp, angles_rad,
 
         with torch.no_grad():
             pert_final = forward_from_layer_to_final(model, ctx, perturbed, layer)
-            # L2 distance in final-layer activation space
-            l2_dists[ang_idx] = (pert_final.float() - ref_final.float()).norm(dim=-1).item()
+            # L2 distance
+            if measure_layer is not None:
+                pert_measure = forward_from_layer_to_layer(model, ctx, perturbed, layer, measure_layer)
+            else:
+                pert_measure = pert_final
+            l2_dists[ang_idx] = (pert_measure.float() - ref_measure.float()).norm(dim=-1).item()
             # KL divergence
             pert_ln = _get_final_norm(model)(pert_final.unsqueeze(1)).squeeze(1)
             pert_logits = _get_lm_head(model)(pert_ln)
@@ -102,7 +110,7 @@ def sweep_single_direction(model, context, activation, v_perp, angles_rad,
 
 
 def sweep_random_directions(model, context, activation, n_dirs, angles_rad,
-                            layer, device):
+                            layer, device, measure_layer=None):
     """Sweep multiple random orthogonal directions. Returns KL and L2 arrays."""
     d_model = activation.shape[0]
     a_unit = activation / activation.norm()
@@ -116,7 +124,8 @@ def sweep_random_directions(model, context, activation, n_dirs, angles_rad,
     all_l2 = np.zeros((n_dirs, len(angles_rad)))
     for d_idx in range(n_dirs):
         all_kl[d_idx], all_l2[d_idx] = sweep_single_direction(
-            model, context, activation, v[d_idx], angles_rad, layer, device
+            model, context, activation, v[d_idx], angles_rad, layer, device,
+            measure_layer=measure_layer
         )
 
     return all_kl, all_l2  # each [n_dirs, n_angles]
@@ -134,10 +143,14 @@ def main():
     parser.add_argument('--n_angles', type=int, default=40)
     parser.add_argument('--seq_len', type=int, default=128)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--direction_pkl', type=str, default=None,
-                        help='Path to results.pkl from iterative_melbo_hf (overrides contrastive dirs)')
+    parser.add_argument('--direction_pkl', type=str, nargs='+', default=None,
+                        help='Path(s) to direction .pkl files. Accepts multiple paths.')
     parser.add_argument('--dir_idx', type=int, default=0,
-                        help='Which direction to use from direction_pkl (default: 0)')
+                        help='Which direction to use from each direction_pkl (default: 0)')
+    parser.add_argument('--dir_labels', type=str, nargs='+', default=None,
+                        help='Labels for each direction_pkl (default: auto from filename)')
+    parser.add_argument('--measure_layer', type=int, default=None,
+                        help='Layer at which to measure L2 distance (default: final layer)')
     parser.add_argument('--custom_prompts', type=str, default=None,
                         help='Pipe-separated custom prompts to use instead of FineWeb (e.g. "prompt1|prompt2")')
     parser.add_argument('--results_dir', default=None)
@@ -159,19 +172,30 @@ def main():
     # Load model
     print(f"Loading model: {args.model}")
     model, tokenizer, device = load_model(args.model)
-    print(f"Device: {device}")
+    n_layers = len(_get_blocks(model))
+    if args.measure_layer is not None and args.measure_layer < 0:
+        args.measure_layer = n_layers + args.measure_layer
+    measure_str = f", measure_layer={args.measure_layer}" if args.measure_layer is not None else ""
+    print(f"Device: {device}{measure_str}")
 
     # Load feature directions
     if args.direction_pkl:
-        print(f"Loading direction from {args.direction_pkl}")
-        with open(args.direction_pkl, 'rb') as f:
-            dir_data = pickle.load(f)
-        direction = dir_data['directions'][args.dir_idx].float()
-        direction = direction / direction.norm()
-        opt_angle = dir_data['args'].get('opt_angle', '?')
-        dir_label = f'MELBO (opt@{opt_angle}°)'
-        named_directions = {dir_label: direction}
-        print(f"  Direction {args.dir_idx}: opt_angle={opt_angle}°")
+        named_directions = {}
+        for i, pkl_path in enumerate(args.direction_pkl):
+            print(f"Loading direction from {pkl_path}")
+            with open(pkl_path, 'rb') as f:
+                dir_data = pickle.load(f)
+            direction = dir_data['directions'][args.dir_idx].float()
+            direction = direction / direction.norm()
+            if args.dir_labels and i < len(args.dir_labels):
+                dir_label = args.dir_labels[i]
+            elif 'args' in dir_data:
+                opt_angle = dir_data['args'].get('opt_angle', '?')
+                dir_label = f'MELBO (opt@{opt_angle}°)'
+            else:
+                dir_label = os.path.basename(os.path.dirname(pkl_path))
+            named_directions[dir_label] = direction
+            print(f"  Direction {args.dir_idx}: {dir_label}")
     else:
         lang_path = f'results/allpairs_contrastive/{args.model}/directions.pkl'
         prog_path = f'results/programming_contrastive/{args.model}/directions_6lang_with_python.pkl'
@@ -253,7 +277,7 @@ def main():
         # Random directions
         rand_kl, rand_l2 = sweep_random_directions(
             model, contexts[i], activations[i], args.n_random_dirs,
-            angles_rad, args.layer, device
+            angles_rad, args.layer, device, measure_layer=args.measure_layer
         )
         results_kl['random'][i] = rand_kl
         results_l2['random'][i] = rand_l2
@@ -263,7 +287,7 @@ def main():
             v_perp = project_orthogonal(direction, activations[i])
             kl, l2 = sweep_single_direction(
                 model, contexts[i], activations[i], v_perp,
-                angles_rad, args.layer, device
+                angles_rad, args.layer, device, measure_layer=args.measure_layer
             )
             results_kl[name][i] = kl
             results_l2[name][i] = l2
@@ -297,7 +321,7 @@ def main():
 
     for ax, (metric_data, metric_name) in zip(axes, [
         (results_kl, 'KL divergence (nats)'),
-        (results_l2, 'L2 distance (final layer)'),
+        (results_l2, f'L2 distance (layer {args.measure_layer})' if args.measure_layer is not None else 'L2 distance (final layer)'),
     ]):
         # Random: median over directions per activation, then across activations
         rand = metric_data['random']  # [n_act, n_dirs, n_angles]

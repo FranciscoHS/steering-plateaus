@@ -92,6 +92,8 @@ def main():
                              'Remaining k - n_melbo are random.')
     parser.add_argument('--random_select', action='store_true',
                         help='Randomly select MELBO directions from pool instead of first k')
+    parser.add_argument('--dir_offset', type=int, default=0,
+                        help='Starting index into direction pool (default: 0)')
     parser.add_argument('--n_random', type=int, default=500,
                         help='Number of random directions to test')
     parser.add_argument('--l2_threshold', type=float, default=100)
@@ -121,21 +123,19 @@ def main():
 
     n_available = all_dirs.shape[0]
     if n_melbo == args.k and not args.random_select:
-        basis_dirs = all_dirs[:args.k]
-        print(f"Using first {args.k} MELBO directions, d_model={d_model}")
+        basis_dirs = all_dirs[args.dir_offset:args.dir_offset + args.k]
+        print(f"Using MELBO directions [{args.dir_offset}:{args.dir_offset + args.k}], d_model={d_model}")
     elif n_melbo == args.k and args.random_select:
         melbo_idx = np.random.choice(n_available, size=n_melbo, replace=False)
         basis_dirs = all_dirs[melbo_idx]
         print(f"Using {args.k} randomly-selected MELBO directions (from {n_available}), d_model={d_model}")
     else:
-        # Randomly select n_melbo MELBO directions from the pool
-        melbo_idx = np.random.choice(n_available, size=n_melbo, replace=False)
-        melbo_dirs = all_dirs[melbo_idx]
+        melbo_dirs = all_dirs[args.dir_offset:args.dir_offset + n_melbo]
         n_rand_basis = args.k - n_melbo
         rand_basis = torch.randn(n_rand_basis, d_model)
         rand_basis = F.normalize(rand_basis, dim=1)
         basis_dirs = torch.cat([melbo_dirs, rand_basis], dim=0)
-        print(f"Using {n_melbo} random MELBO (from {n_available}) + {n_rand_basis} random basis directions, d_model={d_model}")
+        print(f"Using MELBO dirs [{args.dir_offset}:{args.dir_offset + n_melbo}] + {n_rand_basis} random basis directions, d_model={d_model}")
 
     # Load model
     dtype_map = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}

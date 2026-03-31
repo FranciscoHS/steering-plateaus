@@ -28,7 +28,7 @@ import matplotlib.pyplot as plt
 
 from src.model import (
     load_model, forward_from_layer_to_final, forward_from_layer_to_layer,
-    _get_final_norm, _get_lm_head, _get_blocks,
+    _get_final_norm, _get_lm_head, _get_blocks, ablate_attention, ablate_mlp,
 )
 from src.data import load_fineweb_fixed_length, generate_random_token_sequences, load_python_code_fixed_length, generate_chess_games
 
@@ -183,6 +183,12 @@ def main():
                         help='Model dtype (default: model.py default)')
     parser.add_argument('--max_angle', type=float, default=180,
                         help='Maximum perturbation angle in degrees (default: 180)')
+    parser.add_argument('--ablate_attention', action='store_true',
+                        help='Zero-ablate all attention heads (MLP-only forward pass)')
+    parser.add_argument('--ablate_mlp', action='store_true',
+                        help='Zero-ablate all MLP outputs (attention-only forward pass)')
+    parser.add_argument('--no_special_tokens', action='store_true',
+                        help='Disable special tokens (e.g. BOS) in tokenization')
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -222,6 +228,15 @@ def main():
     print(f"Device: {device}, d_model: {d_model}, n_layers: {n_layers}"
           + (f", measure_layer: {args.measure_layer}" if args.measure_layer is not None else ""))
 
+    if args.ablate_attention and args.ablate_mlp:
+        raise ValueError("Cannot ablate both attention and MLP simultaneously")
+    if args.ablate_attention:
+        hooks = ablate_attention(model)
+        print(f"Ablated attention in all {len(hooks)} layers")
+    if args.ablate_mlp:
+        hooks = ablate_mlp(model)
+        print(f"Ablated MLP in all {len(hooks)} layers")
+
     # Resolve data source
     data_source = args.data_source
     if data_source == 'auto':
@@ -249,7 +264,9 @@ def main():
         token_ids_list = generate_chess_games(n_load, args.seq_len, seed=args.seed)
     else:
         print(f"Loading {n_load} FineWeb sequences...")
-        token_ids_list = load_fineweb_fixed_length(n_load, tokenizer, seq_len=args.seq_len, seed=args.seed)
+        add_special = not args.no_special_tokens
+        token_ids_list = load_fineweb_fixed_length(n_load, tokenizer, seq_len=args.seq_len, seed=args.seed,
+                                                   add_special_tokens=add_special)
     print(f"Extracting layer-{args.layer} activations...")
     all_contexts, all_activations = extract_context_and_activation(
         model, tokenizer, token_ids_list, args.layer, device

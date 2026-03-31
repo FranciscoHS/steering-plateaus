@@ -185,7 +185,8 @@ def load_fineweb_samples(n, tokenizer, min_tokens=10, max_tokens=512, seed=42):
     return texts, token_counts
 
 
-def load_fineweb_fixed_length(n, tokenizer, seq_len=5, seed=42, cache_dir="/workspace/fineweb_cache"):
+def load_fineweb_fixed_length(n, tokenizer, seq_len=5, seed=42, cache_dir="/workspace/fineweb_cache",
+                              add_special_tokens=True):
     """
     Load FineWeb samples tokenized to exactly seq_len tokens.
 
@@ -222,6 +223,7 @@ def load_fineweb_fixed_length(n, tokenizer, seq_len=5, seed=42, cache_dir="/work
     for sample in dataset:
         text = sample['text']
         tokens = tokenizer(text, truncation=True, max_length=seq_len,
+                          add_special_tokens=add_special_tokens,
                           return_tensors='pt')
         ids = tokens['input_ids'].squeeze(0)
 
@@ -299,6 +301,11 @@ def sample_random_activations_v2(real_activations, n, mode='full', seed=42, devi
                 raise RuntimeError("Cholesky failed even with large regularization")
         z = torch.randn(n, D, device=device)
         samples = mean.unsqueeze(0) + z @ L.T
+        if samples.isnan().any():
+            print("Cholesky sampling produced NaN, falling back to SVD...")
+            eigvals, eigvecs = torch.linalg.eigh(cov)
+            eigvals = eigvals.clamp(min=0)
+            samples = mean.unsqueeze(0) + z @ (eigvecs * eigvals.sqrt().unsqueeze(0)).T
         rank = torch.linalg.matrix_rank(cov).item()
         print(f"Full covariance: D={D}, rank={rank}, N={N}")
         stats = {'mode': 'full', 'rank': rank}
