@@ -10,7 +10,7 @@ per-language feature directions via all-pairwise contrasts (Section 8
 of multi_contrastive_projection.pdf).
 """
 
-LANGUAGES = ['python', 'javascript', 'java', 'c', 'go', 'rust', 'php', 'typescript', 'lisp', 'haskell']
+LANGUAGES = ['python', 'javascript', 'java', 'c', 'go', 'rust', 'php', 'typescript', 'lisp', 'haskell', 'cpp']
 
 PROMPT_SETS = [
     # === Math ===
@@ -25,6 +25,7 @@ PROMPT_SETS = [
         'typescript': "function fibonacci(n: number): number {",
         'lisp': "(defun fibonacci (n)",
         'haskell': "fibonacci :: Int -> Int\nfibonacci n =",
+        'cpp': "int fibonacci(int n) {",
     },
     {
         'python': "def factorial(n):",
@@ -37,6 +38,7 @@ PROMPT_SETS = [
         'typescript': "function factorial(n: number): number {",
         'lisp': "(defun factorial (n)",
         'haskell': "factorial :: Integer -> Integer\nfactorial n =",
+        'cpp': "long factorial(int n) {",
     },
     {
         'python': "def is_prime(n):",
@@ -49,6 +51,7 @@ PROMPT_SETS = [
         'typescript': "function isPrime(n: number): boolean {",
         'lisp': "(defun is-prime (n)",
         'haskell': "isPrime :: Int -> Bool\nisPrime n =",
+        'cpp': "bool isPrime(int n) {",
     },
     {
         'python': "def gcd(a, b):",
@@ -61,6 +64,7 @@ PROMPT_SETS = [
         'typescript': "function gcd(a: number, b: number): number {",
         'lisp': "(defun gcd-of (a b)",
         'haskell': "myGcd :: Int -> Int -> Int\nmyGcd a b =",
+        'cpp': "int gcd(int a, int b) {",
     },
     {
         'python': "def power(base, exp):",
@@ -73,6 +77,7 @@ PROMPT_SETS = [
         'typescript': "function power(base: number, exp: number): number {",
         'lisp': "(defun power (base exp)",
         'haskell': "power :: Double -> Int -> Double\npower base exp =",
+        'cpp': "double power(double base, int exp) {",
     },
     {
         'python': "def absolute_value(x):",
@@ -85,6 +90,7 @@ PROMPT_SETS = [
         'typescript': "function absoluteValue(x: number): number {",
         'lisp': "(defun absolute-value (x)",
         'haskell': "absoluteValue :: Double -> Double\nabsoluteValue x =",
+        'cpp': "double absoluteValue(double x) {",
     },
     {
         'python': "def is_even(n):",
@@ -97,6 +103,7 @@ PROMPT_SETS = [
         'typescript': "function isEven(n: number): boolean {",
         'lisp': "(defun is-even (n)",
         'haskell': "isEven :: Int -> Bool\nisEven n =",
+        'cpp': "bool isEven(int n) {",
     },
     {
         'python': "def to_binary(n):",
@@ -109,6 +116,7 @@ PROMPT_SETS = [
         'typescript': "function toBinary(n: number): string {",
         'lisp': "(defun to-binary (n)",
         'haskell': "toBinary :: Int -> String\ntoBinary n =",
+        'cpp': "std::string toBinary(int n) {",
     },
 
     # === Strings ===
@@ -123,6 +131,7 @@ PROMPT_SETS = [
         'typescript': "function reverseString(s: string): string {",
         'lisp': "(defun reverse-string (s)",
         'haskell': "reverseString :: String -> String\nreverseString s =",
+        'cpp': "std::string reverseString(const std::string& s) {",
     },
     {
         'python': "def is_palindrome(s):",
@@ -135,6 +144,7 @@ PROMPT_SETS = [
         'typescript': "function isPalindrome(s: string): boolean {",
         'lisp': "(defun is-palindrome (s)",
         'haskell': "isPalindrome :: String -> Bool\nisPalindrome s =",
+        'cpp': "bool isPalindrome(const std::string& s) {",
     },
     {
         'python': "def count_words(text):",
@@ -147,6 +157,7 @@ PROMPT_SETS = [
         'typescript': "function countWords(text: string): number {",
         'lisp': "(defun count-words (text)",
         'haskell': "countWords :: String -> Int\ncountWords text =",
+        'cpp': "int countWords(const std::string& text) {",
     },
     {
         'python': "def capitalize_words(text):",
@@ -159,6 +170,7 @@ PROMPT_SETS = [
         'typescript': "function capitalizeWords(text: string): string {",
         'lisp': "(defun capitalize-words (text)",
         'haskell': "capitalizeWords :: String -> String\ncapitalizeWords text =",
+        'cpp': "std::string capitalizeWords(const std::string& text) {",
     },
     {
         'python': "def string_length(s):",
@@ -171,6 +183,7 @@ PROMPT_SETS = [
         'typescript': "function stringLength(s: string): number {",
         'lisp': "(defun string-length (s)",
         'haskell': "stringLength :: String -> Int\nstringLength s =",
+        'cpp': "int stringLength(const std::string& s) {",
     },
 
     # === Arrays / Lists ===
@@ -185,6 +198,7 @@ PROMPT_SETS = [
         'typescript': "function sortList(arr: number[]): number[] {",
         'lisp': "(defun sort-list (lst)",
         'haskell': "sortList :: Ord a => [a] -> [a]\nsortList xs =",
+        'cpp': "void sortList(std::vector<int>& arr) {",
     },
     {
         'python': "def max_value(arr):",
@@ -197,6 +211,7 @@ PROMPT_SETS = [
         'typescript': "function maxValue(arr: number[]): number {",
         'lisp': "(defun max-value (lst)",
         'haskell': "maxValue :: [Int] -> Int\nmaxValue xs =",
+        'cpp': "int maxValue(const std::vector<int>& arr) {",
     },
     {
         'python': "def min_value(arr):",
@@ -209,6 +224,7 @@ PROMPT_SETS = [
         'typescript': "function minValue(arr: number[]): number {",
         'lisp': "(defun min-value (lst)",
         'haskell': "minValue :: [Int] -> Int\nminValue xs =",
+        'cpp': "int minValue(const std::vector<int>& arr) {",
     },
     {
         'python': "def binary_search(arr, target):",
@@ -221,6 +237,7 @@ PROMPT_SETS = [
         'typescript': "function binarySearch(arr: number[], target: number): number {",
         'lisp': "(defun binary-search (lst target)",
         'haskell': "binarySearch :: Ord a => [a] -> a -> Maybe Int\nbinarySearch xs target =",
+        'cpp': "int binarySearch(const std::vector<int>& arr, int target) {",
     },
     {
         'python': "def contains(arr, item):",
@@ -233,6 +250,7 @@ PROMPT_SETS = [
         'typescript': "function contains(arr: number[], item: number): boolean {",
         'lisp': "(defun contains (lst item)",
         'haskell': "contains :: Eq a => [a] -> a -> Bool\ncontains xs item =",
+        'cpp': "bool contains(const std::vector<int>& arr, int item) {",
     },
     {
         'python': "def remove_duplicates(arr):",
@@ -245,6 +263,7 @@ PROMPT_SETS = [
         'typescript': "function removeDuplicates(arr: number[]): number[] {",
         'lisp': "(defun remove-duplicates (lst)",
         'haskell': "removeDuplicates :: Eq a => [a] -> [a]\nremoveDuplicates xs =",
+        'cpp': "void removeDuplicates(std::vector<int>& arr) {",
     },
     {
         'python': "def find_index(arr, target):",
@@ -257,6 +276,7 @@ PROMPT_SETS = [
         'typescript': "function findIndex(arr: number[], target: number): number {",
         'lisp': "(defun find-index (lst target)",
         'haskell': "findIndex :: Eq a => [a] -> a -> Maybe Int\nfindIndex xs target =",
+        'cpp': "int findIndex(const std::vector<int>& arr, int target) {",
     },
     {
         'python': "def sum_list(numbers):",
@@ -269,6 +289,7 @@ PROMPT_SETS = [
         'typescript': "function sumList(numbers: number[]): number {",
         'lisp': "(defun sum-list (numbers)",
         'haskell': "sumList :: [Int] -> Int\nsumList numbers =",
+        'cpp': "int sumList(const std::vector<int>& numbers) {",
     },
     {
         'python': "def average(numbers):",
@@ -281,6 +302,7 @@ PROMPT_SETS = [
         'typescript': "function average(numbers: number[]): number {",
         'lisp': "(defun average (numbers)",
         'haskell': "average :: [Double] -> Double\naverage numbers =",
+        'cpp': "double average(const std::vector<int>& numbers) {",
     },
     {
         'python': "def flatten(nested):",
@@ -293,6 +315,7 @@ PROMPT_SETS = [
         'typescript': "function flatten(nested: number[][]): number[] {",
         'lisp': "(defun flatten (nested)",
         'haskell': "flatten :: [[a]] -> [a]\nflatten nested =",
+        'cpp': "std::vector<int> flatten(const std::vector<std::vector<int>>& nested) {",
     },
 
     # === Misc ===
@@ -307,6 +330,7 @@ PROMPT_SETS = [
         'typescript': "function readFile(path: string): string {",
         'lisp': "(defun read-file (path)",
         'haskell': "readFile :: FilePath -> IO String\nreadFile path =",
+        'cpp': "std::string readFile(const std::string& path) {",
     },
     {
         'python': "def validate_email(email):",
@@ -319,6 +343,7 @@ PROMPT_SETS = [
         'typescript': "function validateEmail(email: string): boolean {",
         'lisp': "(defun validate-email (email)",
         'haskell': "validateEmail :: String -> Bool\nvalidateEmail email =",
+        'cpp': "bool validateEmail(const std::string& email) {",
     },
     {
         'python': "def calculate_distance(x1, y1, x2, y2):",
@@ -331,6 +356,7 @@ PROMPT_SETS = [
         'typescript': "function calculateDistance(x1: number, y1: number, x2: number, y2: number): number {",
         'lisp': "(defun calculate-distance (x1 y1 x2 y2)",
         'haskell': "calculateDistance :: Double -> Double -> Double -> Double -> Double\ncalculateDistance x1 y1 x2 y2 =",
+        'cpp': "double calculateDistance(double x1, double y1, double x2, double y2) {",
     },
     {
         'python': "def merge_sort(arr):",
@@ -343,6 +369,7 @@ PROMPT_SETS = [
         'typescript': "function mergeSort(arr: number[]): number[] {",
         'lisp': "(defun merge-sort (lst)",
         'haskell': "mergeSort :: Ord a => [a] -> [a]\nmergeSort xs =",
+        'cpp': "void mergeSort(std::vector<int>& arr) {",
     },
     {
         'python': "def depth_first_search(graph, start):",
@@ -355,6 +382,7 @@ PROMPT_SETS = [
         'typescript': "function depthFirstSearch(graph: Map<number, number[]>, start: number): number[] {",
         'lisp': "(defun depth-first-search (graph start)",
         'haskell': "depthFirstSearch :: Ord a => Map a [a] -> a -> [a]\ndepthFirstSearch graph start =",
+        'cpp': "std::vector<int> depthFirstSearch(const std::unordered_map<int, std::vector<int>>& graph, int start) {",
     },
     {
         'python': "def matrix_multiply(a, b):",
@@ -367,6 +395,7 @@ PROMPT_SETS = [
         'typescript': "function matrixMultiply(a: number[][], b: number[][]): number[][] {",
         'lisp': "(defun matrix-multiply (a b)",
         'haskell': "matrixMultiply :: [[Int]] -> [[Int]] -> [[Int]]\nmatrixMultiply a b =",
+        'cpp': "std::vector<std::vector<int>> matrixMultiply(const std::vector<std::vector<int>>& a, const std::vector<std::vector<int>>& b) {",
     },
     {
         'python': "def zip_lists(a, b):",
@@ -379,6 +408,7 @@ PROMPT_SETS = [
         'typescript': "function zipLists(a: number[], b: number[]): [number, number][] {",
         'lisp': "(defun zip-lists (a b)",
         'haskell': "zipLists :: [a] -> [b] -> [(a, b)]\nzipLists xs ys =",
+        'cpp': "std::vector<std::pair<int, int>> zipLists(const std::vector<int>& a, const std::vector<int>& b) {",
     },
 ]
 
