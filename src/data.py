@@ -237,6 +237,13 @@ def load_fineweb_fixed_length(n, tokenizer, seq_len=5, seed=42, cache_dir="/work
             print(f"  Collected {len(token_ids_list)}/{n} sequences...")
 
     print(f"Loaded {len(token_ids_list)} FineWeb samples (each {seq_len} tokens)")
+
+    # Save to cache for future use
+    if cache_dir and len(token_ids_list) == n:
+        os.makedirs(cache_dir, exist_ok=True)
+        torch.save(token_ids_list, cache_file)
+        print(f"Cached to {cache_file}")
+
     return token_ids_list
 
 

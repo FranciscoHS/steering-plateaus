@@ -29,6 +29,7 @@ MODEL_ALIASES = {
     'dense_csp_2x': 'dense1_2x',
     'dense_csp_4x': 'dense1_4x',
     'deepseek-r1-distill-qwen-7b': 'deepseek-ai/DeepSeek-R1-Distill-Qwen-7B',
+    'llama-3.2-1b': 'meta-llama/Llama-3.2-1B',
     'llama-3.1-8b': 'meta-llama/Llama-3.1-8B',
     'phi-1.5': 'microsoft/phi-1_5',
     'pythia-1.4b': 'EleutherAI/pythia-1.4b',

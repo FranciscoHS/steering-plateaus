@@ -60,10 +60,12 @@ def sweep_single_direction(model, context, activation, v_perp, angles_rad,
     Returns:
         kl_divs: [n_angles] array of KL divergences
         l2_dists: [n_angles] array of L2 distances (at measure_layer if set, else final layer)
+        cos_dists: [n_angles] array of cosine distances (at measure_layer if set, else final layer)
     """
     n_angles = len(angles_rad)
     kl_divs = np.zeros(n_angles)
     l2_dists = np.zeros(n_angles)
+    cos_dists = np.zeros(n_angles)
 
     model_dtype = next(model.parameters()).dtype
     ctx = context.unsqueeze(0).to(device=device, dtype=model_dtype)
@@ -93,12 +95,14 @@ def sweep_single_direction(model, context, activation, v_perp, angles_rad,
 
         with torch.no_grad():
             pert_final = forward_from_layer_to_final(model, ctx, perturbed, layer)
-            # L2 distance
+            # L2 and cosine distance
             if measure_layer is not None:
                 pert_measure = forward_from_layer_to_layer(model, ctx, perturbed, layer, measure_layer)
             else:
                 pert_measure = pert_final
             l2_dists[ang_idx] = (pert_measure.float() - ref_measure.float()).norm(dim=-1).item()
+            cos_sim = F.cosine_similarity(pert_measure.float(), ref_measure.float(), dim=-1)
+            cos_dists[ang_idx] = (1.0 - cos_sim).item()
             # KL divergence
             pert_ln = _get_final_norm(model)(pert_final.unsqueeze(1)).squeeze(1)
             pert_logits = _get_lm_head(model)(pert_ln)
@@ -106,12 +110,12 @@ def sweep_single_direction(model, context, activation, v_perp, angles_rad,
             kl = (ref_probs * (ref_log_probs - pert_log_probs)).sum(dim=-1)
             kl_divs[ang_idx] = kl.item()
 
-    return kl_divs, l2_dists
+    return kl_divs, l2_dists, cos_dists
 
 
 def sweep_random_directions(model, context, activation, n_dirs, angles_rad,
                             layer, device, measure_layer=None):
-    """Sweep multiple random orthogonal directions. Returns KL and L2 arrays."""
+    """Sweep multiple random orthogonal directions. Returns KL, L2, and cos_dist arrays."""
     d_model = activation.shape[0]
     a_unit = activation / activation.norm()
 
@@ -122,13 +126,14 @@ def sweep_random_directions(model, context, activation, n_dirs, angles_rad,
 
     all_kl = np.zeros((n_dirs, len(angles_rad)))
     all_l2 = np.zeros((n_dirs, len(angles_rad)))
+    all_cos = np.zeros((n_dirs, len(angles_rad)))
     for d_idx in range(n_dirs):
-        all_kl[d_idx], all_l2[d_idx] = sweep_single_direction(
+        all_kl[d_idx], all_l2[d_idx], all_cos[d_idx] = sweep_single_direction(
             model, context, activation, v[d_idx], angles_rad, layer, device,
             measure_layer=measure_layer
         )
 
-    return all_kl, all_l2  # each [n_dirs, n_angles]
+    return all_kl, all_l2, all_cos  # each [n_dirs, n_angles]
 
 
 def main():
@@ -268,29 +273,33 @@ def main():
     # Storage: random gets [n_act, n_random_dirs, n_angles], named get [n_act, n_angles]
     results_kl = {'random': np.zeros((args.n_act, args.n_random_dirs, n_angles))}
     results_l2 = {'random': np.zeros((args.n_act, args.n_random_dirs, n_angles))}
+    results_cos = {'random': np.zeros((args.n_act, args.n_random_dirs, n_angles))}
     for name in named_directions:
         results_kl[name] = np.zeros((args.n_act, n_angles))
         results_l2[name] = np.zeros((args.n_act, n_angles))
+        results_cos[name] = np.zeros((args.n_act, n_angles))
 
     t0 = time.time()
     for i in range(args.n_act):
         # Random directions
-        rand_kl, rand_l2 = sweep_random_directions(
+        rand_kl, rand_l2, rand_cos = sweep_random_directions(
             model, contexts[i], activations[i], args.n_random_dirs,
             angles_rad, args.layer, device, measure_layer=args.measure_layer
         )
         results_kl['random'][i] = rand_kl
         results_l2['random'][i] = rand_l2
+        results_cos['random'][i] = rand_cos
 
         # Named directions
         for name, direction in named_directions.items():
             v_perp = project_orthogonal(direction, activations[i])
-            kl, l2 = sweep_single_direction(
+            kl, l2, cos = sweep_single_direction(
                 model, contexts[i], activations[i], v_perp,
                 angles_rad, args.layer, device, measure_layer=args.measure_layer
             )
             results_kl[name][i] = kl
             results_l2[name][i] = l2
+            results_cos[name][i] = cos
 
         if (i + 1) % 5 == 0:
             elapsed = time.time() - t0
@@ -306,6 +315,7 @@ def main():
         'angles_deg': angles_deg,
         'kl': results_kl,
         'l2': results_l2,
+        'cos': results_cos,
     }
     pkl_path = os.path.join(args.results_dir, 'feature_vs_random_sweep.pkl')
     with open(pkl_path, 'wb') as f:
@@ -317,11 +327,13 @@ def main():
     palette = ['#4a86c8', '#c84a5a', '#7b4ac8', '#4ac87b', '#c8a84a']
     colors = {name: palette[i % len(palette)] for i, name in enumerate(dir_names)}
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    measure_label = f'layer {args.measure_layer}' if args.measure_layer is not None else 'final layer'
+    fig, axes = plt.subplots(1, 3, figsize=(20, 6))
 
     for ax, (metric_data, metric_name) in zip(axes, [
         (results_kl, 'KL divergence (nats)'),
-        (results_l2, f'L2 distance (layer {args.measure_layer})' if args.measure_layer is not None else 'L2 distance (final layer)'),
+        (results_l2, f'L2 distance ({measure_label})'),
+        (results_cos, f'Cosine distance ({measure_label})'),
     ]):
         # Random: median over directions per activation, then across activations
         rand = metric_data['random']  # [n_act, n_dirs, n_angles]
