@@ -37,6 +37,23 @@ from src.data import load_fineweb_fixed_length
 
 # ── Matching pursuit reconstruction ──────────────────────────────────────
 
+def compute_frame_potential(dictionary, chunk_size=1000):
+    """Compute frame potential and ratio to tight-frame bound.
+
+    Returns (fp, fp_ratio) where fp_ratio = FP / (n²/d).
+    A tight frame has fp_ratio = 1.0.
+    """
+    n, d = dictionary.shape
+    device = dictionary.device
+    fp_sum = 0.0
+    for i in range(0, n, chunk_size):
+        end = min(i + chunk_size, n)
+        gram_chunk = dictionary[i:end] @ dictionary.T
+        fp_sum += (gram_chunk ** 2).sum().item()
+    fp_tight = n ** 2 / d
+    return fp_sum, fp_sum / fp_tight
+
+
 def matching_pursuit_reconstruct(dictionary, activations, n_nonzero_coefs):
     """Reconstruct activations via matching pursuit with n atoms.
 
@@ -350,7 +367,11 @@ def main():
     with open(args.dictionary_path, 'rb') as f:
         dict_data = pickle.load(f)
     dictionary = dict_data['dictionary']  # (n_atoms, d_model)
+    # Normalize (should already be unit-norm, but be safe)
+    dictionary = F.normalize(dictionary, dim=-1)
+    fp, fp_ratio = compute_frame_potential(dictionary)
     print(f"  Dictionary: {dictionary.shape}")
+    print(f"  Frame potential: {fp:.1f} (ratio to tight frame: {fp_ratio:.4f})")
 
     # ── Load model ───────────────────────────────────────────────────────
     model, tokenizer, device = load_model(args.model)
@@ -406,6 +427,8 @@ def main():
     results = {
         'n_values': n_values,
         'dictionary': {},
+        'dictionary_fp': fp,
+        'dictionary_fp_ratio': fp_ratio,
         'sae': {},
         'our_sae': {},
         'random': {},
