@@ -174,8 +174,10 @@ def main():
     parser.add_argument('--measure_layer', type=int, default=None,
                         help='Layer at which to measure L2 distance (default: final layer)')
     parser.add_argument('--data_source', type=str, default='auto',
-                        choices=['auto', 'fineweb', 'random', 'python_code', 'chess'],
-                        help='Data source: fineweb, random tokens, python_code, chess, or auto')
+                        choices=['auto', 'fineweb', 'random', 'python_code', 'chess',
+                                 'english_holdout', 'male_holdout', 'coding_agnostic'],
+                        help='Data source: fineweb, random tokens, python_code, chess, '
+                             'english_holdout, male_holdout, coding_agnostic, or auto')
     parser.add_argument('--results_dir', type=str, default=None)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--dtype', type=str, default=None,
@@ -189,6 +191,11 @@ def main():
                         help='Zero-ablate all MLP outputs (attention-only forward pass)')
     parser.add_argument('--no_special_tokens', action='store_true',
                         help='Disable special tokens (e.g. BOS) in tokenization')
+    parser.add_argument('--direction_pkl', type=str, default=None,
+                        help='Path to pkl with a contrastive direction. Switches to '
+                             'contrastive vs random vs combined sweep mode.')
+    parser.add_argument('--direction_key', type=str, default=None,
+                        help='Key in the direction pkl (e.g. d_french)')
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -249,7 +256,28 @@ def main():
 
     # Extract activations
     n_load = max(args.n_act, args.n_fit) if args.cov_matched else args.n_act
-    if data_source == 'random':
+
+    # Holdout prompt sources (variable-length, use extract_activations_holdout)
+    _holdout_sources = {
+        'english_holdout': ('data.english_prompts_holdout', 'ENGLISH_PROMPTS_HOLDOUT'),
+        'male_holdout': ('data.male_prompts_holdout', 'MALE_PROMPTS_HOLDOUT'),
+        'coding_agnostic': ('data.coding_prompts_agnostic', 'CODING_PROMPTS'),
+    }
+    if data_source in _holdout_sources:
+        mod_name, var_name = _holdout_sources[data_source]
+        import importlib
+        mod = importlib.import_module(mod_name)
+        holdout_prompts = getattr(mod, var_name)[:n_load]
+        print(f"Using {len(holdout_prompts)} {data_source} prompts...")
+        from scripts.perturbation.generate_lesswrong_figures import extract_activations_holdout
+        contexts_list, activations_stacked = extract_activations_holdout(
+            model, tokenizer, device, args.layer, holdout_prompts)
+        # contexts_list is list of [1, seq-1, d] (variable seq lengths)
+        # activations_stacked is [n, d]
+        # Squeeze batch dim so contexts[i] is [seq-1, d], matching FineWeb path
+        contexts = [c.squeeze(0) for c in contexts_list]
+        activations = activations_stacked
+    elif data_source == 'random':
         vocab_size = model.config.vocab_size if hasattr(model.config, 'vocab_size') else model.circuit_model.config.vocab_size
         print(f"Generating {n_load} random token sequences (vocab_size={vocab_size})...")
         token_ids_list = generate_random_token_sequences(n_load, vocab_size, args.seq_len, seed=args.seed)
@@ -267,16 +295,159 @@ def main():
         add_special = not args.no_special_tokens
         token_ids_list = load_fineweb_fixed_length(n_load, tokenizer, seq_len=args.seq_len, seed=args.seed,
                                                    add_special_tokens=add_special)
-    print(f"Extracting layer-{args.layer} activations...")
-    all_contexts, all_activations = extract_context_and_activation(
-        model, tokenizer, token_ids_list, args.layer, device
-    )
-    # Use first n_act for the sweep
-    contexts = all_contexts[:args.n_act]
-    activations = all_activations[:args.n_act]
+    if data_source not in _holdout_sources:
+        print(f"Extracting layer-{args.layer} activations...")
+        all_contexts, all_activations = extract_context_and_activation(
+            model, tokenizer, token_ids_list, args.layer, device
+        )
+        # Use first n_act for the sweep
+        contexts = all_contexts[:args.n_act]
+        activations = all_activations[:args.n_act]
     act_norms = activations.norm(dim=-1)
     act_norm_mean = act_norms.mean().item()
     print(f"Mean activation norm: {act_norm_mean:.2f}")
+
+    # --- Contrastive direction mode ---
+    if args.direction_pkl:
+        import pickle as _pkl
+        with open(args.direction_pkl, 'rb') as f:
+            dir_data = _pkl.load(f)
+        d_contrastive = dir_data[args.direction_key]  # [d_model]
+        print(f"\nLoaded contrastive direction '{args.direction_key}' "
+              f"from {args.direction_pkl}")
+
+        # Improved random directions: diff of two activations (shared across all acts)
+        rng = np.random.RandomState(args.seed)
+        n_pool = len(activations)
+        rand_dirs_global = []
+        for _ in range(args.n_dirs):
+            i_r, j_r = rng.choice(n_pool, size=2, replace=False)
+            diff = activations[i_r] - activations[j_r]
+            rand_dirs_global.append(F.normalize(diff, dim=0))
+        rand_dirs_global = torch.stack(rand_dirs_global)  # [n_dirs, d_model]
+        print(f"  Generated {args.n_dirs} improved-random directions "
+              f"(diff of two activations)")
+
+        def make_direction_sets(act, d_contr, rand_dirs):
+            """For one activation, build v_perps for contrastive, random, and combined."""
+            a_unit = act / act.norm()
+            # Orthogonalize contrastive against activation
+            dc = d_contr.float() - (d_contr.float() @ a_unit) * a_unit
+            dc = F.normalize(dc, dim=0)
+            # Orthogonalize improved-random directions against activation
+            v_rand = rand_dirs.float() - (rand_dirs.float() @ a_unit).unsqueeze(1) * a_unit.unsqueeze(0)
+            v_rand = F.normalize(v_rand, dim=-1)
+            # Combined: normalize(contrastive_orth + random_orth) for each random dir
+            v_comb = dc.unsqueeze(0) + v_rand  # [n_dirs, d_model]
+            v_comb = v_comb - (v_comb @ a_unit).unsqueeze(1) * a_unit.unsqueeze(0)
+            v_comb = F.normalize(v_comb, dim=-1)
+            return dc.unsqueeze(0), v_rand, v_comb  # [1, d], [n_dirs, d], [n_dirs, d]
+
+        conditions = ['contrastive', 'random', 'combined']
+        sweep_results = {c: {'l2': [], 'kl': [], 'cos': []} for c in conditions}
+
+        print(f"\n=== Contrastive direction sweep ===")
+        t0 = time.time()
+        for i in range(args.n_act):
+            dc_vp, rand_vp, comb_vp = make_direction_sets(
+                activations[i], d_contrastive, rand_dirs_global)
+            for cond, vp in [('contrastive', dc_vp),
+                             ('random', rand_vp),
+                             ('combined', comb_vp)]:
+                n_d = vp.shape[0]
+                l2, kl, cos = run_spherical_sweep(
+                    model, contexts[i], activations[i], vp,
+                    angles_rad, args.layer, device, n_d,
+                    measure_layer=args.measure_layer)
+                sweep_results[cond]['l2'].append(l2)
+                sweep_results[cond]['kl'].append(kl)
+                sweep_results[cond]['cos'].append(cos)
+            if (i + 1) % 10 == 0:
+                elapsed = time.time() - t0
+                print(f"  {i+1}/{args.n_act}  ({(i+1)/elapsed:.1f} act/s)")
+        print(f"Done in {time.time()-t0:.1f}s")
+
+        # Stack: contrastive is [n_act, n_angles, 1], others [n_act, n_angles, n_dirs]
+        for cond in conditions:
+            for key in ['l2', 'kl', 'cos']:
+                sweep_results[cond][key] = np.stack(sweep_results[cond][key])
+
+        results = {
+            'args': vars(args),
+            'angles_deg': angles_deg,
+            'angles_rad': angles_rad,
+            'act_norm_mean': act_norm_mean,
+            'direction_key': args.direction_key,
+        }
+        for cond in conditions:
+            results[cond] = sweep_results[cond]
+
+        with open(os.path.join(args.results_dir, 'results.pkl'), 'wb') as f:
+            _pkl.dump(results, f)
+
+        # Plot
+        cond_colors = {'contrastive': '#228833', 'random': '#4477AA', 'combined': '#EE6677'}
+        cond_labels = {
+            'contrastive': args.direction_key.replace('d_', '').capitalize(),
+            'random': 'Random',
+            'combined': 'Combined',
+        }
+
+        for plot_type in ['median', 'individual']:
+            fig, axes = plt.subplots(1, 3, figsize=(20, 6))
+            for metric_idx, (key, name) in enumerate(
+                    [('l2', 'L2 distance'), ('cos', 'Cosine distance'), ('kl', 'KL divergence')]):
+                ax = axes[metric_idx]
+                for cond in conditions:
+                    d = results[cond][key]
+                    per_act = np.median(d, axis=2)  # [n_act, n_angles]
+                    color = cond_colors[cond]
+                    label = cond_labels[cond]
+
+                    if plot_type == 'median':
+                        median = np.median(per_act, axis=0)
+                        q25 = np.percentile(per_act, 25, axis=0)
+                        q75 = np.percentile(per_act, 75, axis=0)
+                        ax.plot(angles_deg, median, color=color, label=label, linewidth=2)
+                        ax.fill_between(angles_deg, q25, q75, color=color, alpha=0.15)
+                    else:
+                        np.random.seed(42)
+                        n_individual = min(10, per_act.shape[0])
+                        chosen = np.random.choice(per_act.shape[0], n_individual, replace=False)
+                        for j, idx in enumerate(chosen):
+                            ax.plot(angles_deg, per_act[idx], color=color, alpha=0.4,
+                                    linewidth=1.5, label=label if j == 0 else None)
+
+                ax.set_xlabel('Perturbation angle (degrees)')
+                ax.set_ylabel(name)
+                ax.set_title(name)
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                ax.set_xlim(0, args.max_angle)
+
+                ax2 = ax.twiny()
+                ax2.set_xlim(ax.get_xlim())
+                tick_angles = [a for a in [0, 10, 20, 30, 40, 60, 90, 120, 150, 180]
+                               if a <= args.max_angle]
+                tick_chords = [2 * act_norm_mean * np.sin(np.deg2rad(a) / 2)
+                               for a in tick_angles]
+                ax2.set_xticks(tick_angles)
+                ax2.set_xticklabels([f'{c:.0f}' for c in tick_chords])
+                ax2.set_xlabel('Chord distance')
+
+            measure_label = (f", L2@layer {args.measure_layer}"
+                             if args.measure_layer is not None else "")
+            fig.suptitle(f'{args.model}, layer {args.layer} '
+                         f'(spherical, {args.direction_key}, {plot_type}{measure_label})',
+                         fontsize=14, y=1.02)
+            plt.tight_layout()
+            path = os.path.join(args.results_dir, f'sweep_{plot_type}.png')
+            plt.savefig(path, dpi=150, bbox_inches='tight')
+            plt.close()
+            print(f"Saved: {path}")
+
+        print("\nDone!")
+        return
 
     # Comparison activations
     if args.delta_path:
