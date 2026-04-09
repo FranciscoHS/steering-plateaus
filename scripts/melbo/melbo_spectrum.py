@@ -233,6 +233,9 @@ def main():
                         help='Max directions to find per angle')
     parser.add_argument('--floor_ratio', type=float, default=0.05,
                         help='Stop when objective drops below this fraction of direction 1')
+    parser.add_argument('--random_floor_multiple', type=float, default=None,
+                        help='If set, stop when objective drops below this multiple of '
+                             'the random median (overrides floor_ratio)')
     parser.add_argument('--n_steps', type=int, default=200,
                         help='Optimization steps per direction')
     parser.add_argument('--n_restarts', type=int, default=3,
@@ -342,6 +345,15 @@ def main():
     active = {i: True for i in range(n_angles)}
     thresholds = {}
 
+    # Precompute random median floors if using random_floor_multiple
+    if args.random_floor_multiple is not None:
+        for i in range(n_angles):
+            ang_idx = np.argmin(np.abs(sweep_angles_deg - opt_angles_deg[i]))
+            rand_med = np.median(random_objs[ang_idx])
+            thresholds[i] = args.random_floor_multiple * rand_med
+            print(f"  {opt_angles_deg[i]}°: floor = {args.random_floor_multiple}x × "
+                  f"random median ({rand_med:.4f}) = {thresholds[i]:.4f}")
+
     for d_idx in range(args.max_directions):
         active_angles = [(i, angles_rad[i]) for i in range(n_angles) if active[i]]
         if not active_angles:
@@ -363,10 +375,11 @@ def main():
             all_directions[i].append(direction)
             all_objs[i].append(obj_val)
 
-            if d_idx == 0:
+            # Set threshold on first direction if using floor_ratio mode
+            if d_idx == 0 and args.random_floor_multiple is None:
                 thresholds[i] = obj_val * args.floor_ratio
 
-            if d_idx > 0 and obj_val < thresholds[i]:
+            if obj_val < thresholds.get(i, -float('inf')):
                 active[i] = False
                 status_parts.append(f"{opt_angles_deg[i]}°:STOP({obj_name}={obj_val:.6f})")
             else:

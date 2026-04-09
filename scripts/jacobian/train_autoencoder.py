@@ -47,10 +47,11 @@ class DeepAutoencoder(nn.Module):
     All hidden layers use ReLU. Bottleneck and output are linear.
     """
 
-    def __init__(self, d_in, k, hidden_dims=None):
+    def __init__(self, d_in, k, hidden_dims=None, use_batchnorm=False):
         super().__init__()
         self.d_in = d_in
         self.k = k
+        self.use_batchnorm = use_batchnorm
 
         if hidden_dims is None:
             hidden_dims = [d_in // 2, d_in // 4]
@@ -60,6 +61,8 @@ class DeepAutoencoder(nn.Module):
         prev_dim = d_in
         for h in hidden_dims:
             encoder_layers.append(nn.Linear(prev_dim, h))
+            if use_batchnorm:
+                encoder_layers.append(nn.BatchNorm1d(h))
             encoder_layers.append(nn.ReLU())
             prev_dim = h
         encoder_layers.append(nn.Linear(prev_dim, k))  # bottleneck (linear)
@@ -70,6 +73,8 @@ class DeepAutoencoder(nn.Module):
         prev_dim = k
         for h in reversed(hidden_dims):
             decoder_layers.append(nn.Linear(prev_dim, h))
+            if use_batchnorm:
+                decoder_layers.append(nn.BatchNorm1d(h))
             decoder_layers.append(nn.ReLU())
             prev_dim = h
         decoder_layers.append(nn.Linear(prev_dim, d_in))  # output (linear)
@@ -256,6 +261,10 @@ def main():
                         help='Reuse cached activations if available')
     parser.add_argument('--cache_path', default=None,
                         help='Path to cached activations (overrides default)')
+    parser.add_argument('--batchnorm', action='store_true',
+                        help='Add BatchNorm1d between layers')
+    parser.add_argument('--resume_from', default=None,
+                        help='Path to ae_weights.pt to resume training from')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -284,9 +293,16 @@ def main():
     torch.cuda.empty_cache()
 
     # ── Train ────────────────────────────────────────────────────────────
-    ae = DeepAutoencoder(d_in=d_model, k=args.k, hidden_dims=hidden_dims).to(device)
+    ae = DeepAutoencoder(d_in=d_model, k=args.k, hidden_dims=hidden_dims,
+                         use_batchnorm=args.batchnorm).to(device)
     n_params = sum(p.numel() for p in ae.parameters())
     print(f"\nAutoencoder parameters: {n_params / 1e6:.2f}M")
+
+    if args.resume_from:
+        print(f"Resuming from {args.resume_from}")
+        checkpoint = torch.load(args.resume_from, weights_only=True)
+        ae.load_state_dict(checkpoint['state_dict'])
+        print("  Loaded weights")
 
     training_log = train(ae, activations, args, device)
 

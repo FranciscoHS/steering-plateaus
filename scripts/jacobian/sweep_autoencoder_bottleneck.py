@@ -91,6 +91,8 @@ def main():
     # SAE baseline (provide manually or train)
     parser.add_argument('--sae_cos', type=float, default=None,
                         help='SAE cosine similarity baseline (if known)')
+    parser.add_argument('--batchnorm', action='store_true',
+                        help='Add BatchNorm1d between layers')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -111,7 +113,8 @@ def main():
         print(f"{'='*60}")
 
         torch.manual_seed(args.seed)
-        ae = DeepAutoencoder(d_in=d_model, k=k, hidden_dims=args.hidden_dims).to(device)
+        ae = DeepAutoencoder(d_in=d_model, k=k, hidden_dims=args.hidden_dims,
+                             use_batchnorm=args.batchnorm).to(device)
         n_params = sum(p.numel() for p in ae.parameters())
         print(f"  Architecture: {d_model} → {' → '.join(str(h) for h in args.hidden_dims)} → {k}")
         print(f"  Parameters: {n_params / 1e6:.2f}M")

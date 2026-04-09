@@ -86,6 +86,17 @@ def optimize_points(model, points, contexts, layer, n_steps=200, lr=0.1,
             print(f"  step {step}: jac={total_jac_loss/N:.1f}, dist_loss={total_dist_loss/N:.1f}, "
                   f"avg_move={avg_dist:.2f}")
 
+        # Checkpoint every 50 steps
+        if (step + 1) % 50 == 0:
+            import os
+            os.makedirs("results/intrinsic_dim", exist_ok=True)
+            torch.save({
+                'X_opt': x.detach().cpu(),
+                'history': {'jac': jac_history, 'dist': dist_history},
+                'step': step + 1,
+            }, "results/intrinsic_dim/jac_optimized_checkpoint.pt")
+            print(f"  [checkpoint saved at step {step + 1}]")
+
     return x.detach().cpu(), {'jac': jac_history, 'dist': dist_history}
 
 
@@ -149,15 +160,24 @@ def main():
         n_steps=n_steps, lr=lr, lam=lam, n_probes=n_probes, device=device,
     )
 
+    # Checkpoint immediately so we don't lose optimization results
+    os.makedirs("results/intrinsic_dim", exist_ok=True)
+    torch.save({
+        'X_opt': X_opt,
+        'X_gauss_subset': gauss_subset,
+        'history': history,
+        'n_steps': n_steps, 'lr': lr, 'lam': lam, 'n_probes': n_probes,
+    }, "results/intrinsic_dim/jac_optimized_checkpoint.pt")
+    print("Checkpoint saved to results/intrinsic_dim/jac_optimized_checkpoint.pt")
+
     # TWO-NN after optimization
     est_after = skdim.id.TwoNN()
     est_after.fit(X_opt.float().numpy())
     print(f"\nAfter optimization: TWO-NN ID = {est_after.dimension_:.2f} (n={n_points})")
 
     # Distance to nearest real activation
-    from torch.nn.functional import cdist
-    dists_before = cdist(gauss_subset.float().unsqueeze(0), X_real.float().unsqueeze(0)).squeeze(0)
-    dists_after = cdist(X_opt.float().unsqueeze(0), X_real.float().unsqueeze(0)).squeeze(0)
+    dists_before = torch.cdist(gauss_subset.float().unsqueeze(0), X_real.float().unsqueeze(0)).squeeze(0)
+    dists_after = torch.cdist(X_opt.float().unsqueeze(0), X_real.float().unsqueeze(0)).squeeze(0)
     nn_before = dists_before.min(dim=1).values
     nn_after = dists_after.min(dim=1).values
     print(f"\nDist to nearest real activation:")
