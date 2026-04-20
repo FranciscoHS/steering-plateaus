@@ -250,6 +250,8 @@ def main():
     parser.add_argument('--max_sweep_angle', type=float, default=60,
                         help='Max angle for baseline sweep (degrees)')
     parser.add_argument('--results_dir', default=None)
+    parser.add_argument('--resume', action='store_true',
+                        help='Resume from checkpoint.pkl in results_dir')
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
 
@@ -311,50 +313,98 @@ def main():
         args.objective, ref_data, args.target_layer)
     obj_name = 'KL' if args.objective == 'kl' else 'L2'
 
+    # ===== Check for resume =====
+    resume_start = 0
+    if args.resume:
+        ckpt_path = os.path.join(args.results_dir, 'checkpoint.pkl')
+        assert os.path.exists(ckpt_path), f"No checkpoint found at {ckpt_path}"
+        print(f"\nResuming from {ckpt_path}")
+        with open(ckpt_path, 'rb') as f:
+            ckpt = pickle.load(f)
+
+        sweep_angles_deg = ckpt['sweep_angles_deg']
+        random_objs = ckpt['random_objs']
+        print(f"Loaded random baseline: {random_objs.shape}")
+
+        # Rebuild state from checkpoint
+        n_angles = len(opt_angles_deg)
+        angles_rad = [np.deg2rad(a) for a in opt_angles_deg]
+        all_directions = {i: [] for i in range(n_angles)}
+        all_objs = {i: [] for i in range(n_angles)}
+        active = {i: True for i in range(n_angles)}
+        thresholds = {}
+
+        for i, ang_deg in enumerate(opt_angles_deg):
+            if ang_deg in ckpt['melbo_results']:
+                prev = ckpt['melbo_results'][ang_deg]
+                all_objs[i] = list(prev['objs'])
+                all_directions[i] = [d.to(device) for d in prev['directions']]
+                resume_start = max(resume_start, len(all_objs[i]))
+                print(f"  {ang_deg}°: restored {len(all_objs[i])} directions, "
+                      f"last L2={all_objs[i][-1]:.1f}")
+
+        # Precompute floors
+        if args.random_floor_multiple is not None:
+            for i in range(n_angles):
+                ang_idx = np.argmin(np.abs(sweep_angles_deg - opt_angles_deg[i]))
+                rand_med = np.median(random_objs[ang_idx])
+                thresholds[i] = args.random_floor_multiple * rand_med
+                print(f"  {opt_angles_deg[i]}°: floor = {args.random_floor_multiple}x × "
+                      f"random median ({rand_med:.4f}) = {thresholds[i]:.4f}")
+        elif resume_start > 0:
+            # Reconstruct floor_ratio thresholds from first direction
+            for i in range(n_angles):
+                if all_objs[i]:
+                    thresholds[i] = all_objs[i][0] * args.floor_ratio
+
+        print(f"Resuming from direction {resume_start + 1}")
+
     # ===== Part 1: Random baseline sweep =====
-    print(f"\n{'='*60}")
-    print(f"RANDOM BASELINE SWEEP: {args.n_random_dirs} dirs, {args.n_sweep_angles} angles")
-    print(f"{'='*60}")
+    if not args.resume:
+        print(f"\n{'='*60}")
+        print(f"RANDOM BASELINE SWEEP: {args.n_random_dirs} dirs, {args.n_sweep_angles} angles")
+        print(f"{'='*60}")
 
-    sweep_angles_deg = np.linspace(0, args.max_sweep_angle, args.n_sweep_angles + 1)[1:]
-    sweep_angles_rad = np.deg2rad(sweep_angles_deg)
+        sweep_angles_deg = np.linspace(0, args.max_sweep_angle, args.n_sweep_angles + 1)[1:]
+        sweep_angles_rad = np.deg2rad(sweep_angles_deg)
 
-    t0 = time.time()
-    random_objs = random_direction_sweep(
-        objective_fn, sweep_angles_rad, device, d_model, n_dirs=args.n_random_dirs)
-    print(f"Random sweep done in {time.time()-t0:.0f}s")
+        t0 = time.time()
+        random_objs = random_direction_sweep(
+            objective_fn, sweep_angles_rad, device, d_model, n_dirs=args.n_random_dirs)
+        print(f"Random sweep done in {time.time()-t0:.0f}s")
 
-    for ang_idx, ang_deg in enumerate(sweep_angles_deg):
-        median = np.median(random_objs[ang_idx])
-        q75 = np.percentile(random_objs[ang_idx], 75)
-        q95 = np.percentile(random_objs[ang_idx], 95)
-        if ang_deg in opt_angles_deg or ang_idx == len(sweep_angles_deg) - 1:
-            print(f"  {ang_deg:5.1f}°: median={median:.6f}, 75th={q75:.6f}, 95th={q95:.6f}")
+        for ang_idx, ang_deg in enumerate(sweep_angles_deg):
+            median = np.median(random_objs[ang_idx])
+            q75 = np.percentile(random_objs[ang_idx], 75)
+            q95 = np.percentile(random_objs[ang_idx], 95)
+            if ang_deg in opt_angles_deg or ang_idx == len(sweep_angles_deg) - 1:
+                print(f"  {ang_deg:5.1f}°: median={median:.6f}, 75th={q75:.6f}, 95th={q95:.6f}")
 
     # ===== Part 2: Iterative MELBO across all angles =====
-    print(f"\n{'='*60}")
-    print(f"MELBO SPECTRUM [{obj_name}] (interleaved, {len(opt_angles_deg)} angles)")
-    print(f"Angles: {opt_angles_deg}")
-    print(f"{'='*60}")
+    if not args.resume:
+        print(f"\n{'='*60}")
+        print(f"MELBO SPECTRUM [{obj_name}] (interleaved, {len(opt_angles_deg)} angles)")
+        print(f"Angles: {opt_angles_deg}")
+        print(f"{'='*60}")
 
-    n_angles = len(opt_angles_deg)
-    angles_rad = [np.deg2rad(a) for a in opt_angles_deg]
+        n_angles = len(opt_angles_deg)
+        angles_rad = [np.deg2rad(a) for a in opt_angles_deg]
 
-    all_directions = {i: [] for i in range(n_angles)}
-    all_objs = {i: [] for i in range(n_angles)}
-    active = {i: True for i in range(n_angles)}
-    thresholds = {}
+        all_directions = {i: [] for i in range(n_angles)}
+        all_objs = {i: [] for i in range(n_angles)}
+        active = {i: True for i in range(n_angles)}
+        thresholds = {}
 
-    # Precompute random median floors if using random_floor_multiple
-    if args.random_floor_multiple is not None:
-        for i in range(n_angles):
-            ang_idx = np.argmin(np.abs(sweep_angles_deg - opt_angles_deg[i]))
-            rand_med = np.median(random_objs[ang_idx])
-            thresholds[i] = args.random_floor_multiple * rand_med
-            print(f"  {opt_angles_deg[i]}°: floor = {args.random_floor_multiple}x × "
-                  f"random median ({rand_med:.4f}) = {thresholds[i]:.4f}")
+        # Precompute random median floors if using random_floor_multiple
+        if args.random_floor_multiple is not None:
+            for i in range(n_angles):
+                ang_idx = np.argmin(np.abs(sweep_angles_deg - opt_angles_deg[i]))
+                rand_med = np.median(random_objs[ang_idx])
+                thresholds[i] = args.random_floor_multiple * rand_med
+                print(f"  {opt_angles_deg[i]}°: floor = {args.random_floor_multiple}x × "
+                      f"random median ({rand_med:.4f}) = {thresholds[i]:.4f}")
 
-    for d_idx in range(args.max_directions):
+    for d_idx in range(resume_start, args.max_directions):
         active_angles = [(i, angles_rad[i]) for i in range(n_angles) if active[i]]
         if not active_angles:
             print(f"\nAll angles stopped at direction {d_idx}")

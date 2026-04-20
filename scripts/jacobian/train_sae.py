@@ -111,8 +111,9 @@ def resample_dead_features(sae, optimizer, activations, feature_fired, n_sample=
         return 0
 
     # Sample activations and find high-loss ones
-    idx = torch.randint(0, activations.shape[0], (n_sample,), device=activations.device)
-    sample = activations[idx]
+    sae_device = sae.encoder.weight.device
+    idx = torch.randint(0, activations.shape[0], (n_sample,))
+    sample = activations[idx].to(sae_device).float()
 
     with torch.no_grad():
         recon, _, _ = sae(sample)
@@ -156,9 +157,22 @@ def cache_activations(model, tokenizer, device, args):
     cache_path = args.cache_path or os.path.join(args.output_dir, "cached_activations.pt")
 
     if args.reuse_cache and os.path.exists(cache_path):
-        print(f"Loading cached activations from {cache_path}")
-        activations = torch.load(cache_path, weights_only=True)
-        print(f"  Shape: {activations.shape}")
+        meta_path = cache_path + '.meta.json'
+        if os.path.exists(meta_path):
+            print(f"Loading cached activations (memmap) from {cache_path}")
+            with open(meta_path) as f:
+                meta = json.load(f)
+            shape = tuple(meta['shape'])
+            np_dtype = np.dtype(meta['dtype'])
+            mm = np.memmap(cache_path, dtype=np_dtype, mode='r', shape=shape)
+            activations = torch.from_numpy(mm)
+        else:
+            print(f"Loading cached activations from {cache_path}")
+            activations = torch.load(cache_path, weights_only=True)
+        print(f"  Shape: {activations.shape}, dtype: {activations.dtype}")
+        if args.max_samples is not None and args.max_samples < activations.shape[0]:
+            activations = activations[:args.max_samples]
+            print(f"  Truncated to first {args.max_samples} samples -> {activations.shape}")
         return activations, cache_path
 
     n_total_needed = args.cache_start + args.n_cache
@@ -172,15 +186,57 @@ def cache_activations(model, tokenizer, device, args):
     print(f"Extracting {n_cache} activations at layer {args.layer} "
           f"(indices [{args.cache_start}, {args.cache_start + n_cache}))...")
 
-    all_activations = []
-    batch_size = 64
+    batch_size = 256
     t0 = time.time()
+
+    # Hook-based extraction: only run through target layer, skip the rest
+    captured = {}
+
+    # Capture in fp16 if --cache_fp16, else fp32
+    save_dtype = torch.float16 if getattr(args, 'cache_fp16', False) else torch.float32
+    np_dtype = np.float16 if save_dtype == torch.float16 else np.float32
+
+    def capture_hook(module, input, output):
+        hidden = output[0] if isinstance(output, tuple) else output
+        captured['act'] = hidden[:, -1, :].to(save_dtype).cpu()
+
+    class EarlyExit(Exception):
+        pass
+
+    def exit_hook(module, input, output):
+        raise EarlyExit()
+
+    layers = model.model.layers
+    handle_capture = layers[args.layer].register_forward_hook(capture_hook)
+    handle_exit = None
+    if args.layer + 1 < len(layers):
+        handle_exit = layers[args.layer + 1].register_forward_hook(exit_hook)
+
+    # Probe d_model by running one small batch
+    probe = torch.stack(cache_tokens[:1]).to(device)
+    with torch.no_grad():
+        try:
+            model(probe)
+        except EarlyExit:
+            pass
+    d_model = captured['act'].shape[-1]
+
+    # Pre-allocate a disk-backed memmap so RAM stays tiny (~1 batch).
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    memmap_path = cache_path  # write raw bytes here; sidecar stores meta
+    memmap = np.memmap(memmap_path, dtype=np_dtype, mode='w+',
+                       shape=(n_cache, d_model))
+    print(f"Streaming to memmap at {memmap_path}: shape ({n_cache}, {d_model}), {np_dtype}")
+
     for i in range(0, n_cache, batch_size):
         batch = torch.stack(cache_tokens[i:i+batch_size]).to(device)
         with torch.no_grad():
-            outputs = model(batch, output_hidden_states=True)
-        hidden = outputs.hidden_states[args.layer + 1]
-        all_activations.append(hidden[:, -1, :].float().cpu())
+            try:
+                model(batch)
+            except EarlyExit:
+                pass
+        act = captured['act']
+        memmap[i:i+act.shape[0]] = act.numpy()
         if (i // batch_size) % 100 == 0:
             done = min(i + batch_size, n_cache)
             elapsed = time.time() - t0
@@ -188,15 +244,28 @@ def cache_activations(model, tokenizer, device, args):
             remaining = (n_cache - done) / rate if rate > 0 else 0
             print(f"  {done}/{n_cache} ({rate:.0f} acts/s, ~{remaining:.0f}s remaining)",
                   end='\r')
+
+    memmap.flush()
+    del memmap
+    handle_capture.remove()
+    if handle_exit is not None:
+        handle_exit.remove()
     print()
 
-    activations = torch.cat(all_activations, dim=0)
-    print(f"Cached {activations.shape[0]} activations, "
-          f"mean norm={activations.norm(dim=-1).mean():.2f}")
+    # Sidecar metadata for loaders.
+    meta_path = cache_path + '.meta.json'
+    with open(meta_path, 'w') as f:
+        json.dump({'shape': [n_cache, d_model],
+                   'dtype': str(np_dtype().dtype),
+                   'format': 'memmap_raw'}, f)
 
-    torch.save(activations, cache_path)
-    print(f"Saved to {cache_path} ({activations.nelement() * 4 / 1e9:.1f} GB)")
+    nbytes = n_cache * d_model * np.dtype(np_dtype).itemsize
+    print(f"Saved raw memmap to {cache_path} ({nbytes / 1e9:.1f} GB, {np_dtype})")
+    print(f"  Meta: {meta_path}")
 
+    # Return a memmap-backed tensor view (no copy) so callers keep working.
+    mm = np.memmap(cache_path, dtype=np_dtype, mode='r', shape=(n_cache, d_model))
+    activations = torch.from_numpy(mm)
     return activations, cache_path
 
 
@@ -204,8 +273,29 @@ def cache_activations(model, tokenizer, device, args):
 
 def train(sae, activations, args, device):
     """Train the SAE on cached activations."""
-    n_cache = activations.shape[0]
-    activations_gpu = activations.to(device)
+    # Val split: hold out the last val_frac of the cache.
+    val_frac = getattr(args, 'val_frac', 0.1)
+    n_total = activations.shape[0]
+    n_val = int(n_total * val_frac)
+    n_cache = n_total - n_val
+    acts_train = activations[:n_cache]
+    acts_val = activations[n_cache:n_cache + n_val]
+    print(f"  Train split: {n_cache} | Val split: {n_val}")
+
+    # If cache fits in GPU memory (fp32), upload once. Otherwise keep on CPU
+    # (memmap) and batch to GPU each step.
+    fp32_gb = n_cache * activations.shape[1] * 4 / 1e9
+    if fp32_gb < 8:
+        activations_gpu = acts_train.to(device).float()
+        cpu_batched = False
+    else:
+        activations_gpu = acts_train  # stays on CPU (possibly memmap)
+        cpu_batched = True
+        print(f"  Cache is {fp32_gb:.1f} GB fp32 — streaming batches CPU→GPU")
+
+    # Prebuild a single validation batch (10k rows) on GPU as fp32.
+    val_sample_n = min(10000, n_val)
+    val_batch = acts_val[:val_sample_n].to(device).float()
 
     optimizer = torch.optim.Adam(sae.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.n_steps)
@@ -224,9 +314,12 @@ def train(sae, activations, args, device):
     print()
 
     for step in range(args.n_steps):
-        # Sample random batch
-        idx = torch.randint(0, n_cache, (args.batch_size,), device=device)
-        batch = activations_gpu[idx]
+        if cpu_batched:
+            idx = torch.randint(0, n_cache, (args.batch_size,))
+            batch = activations_gpu[idx].to(device).float()
+        else:
+            idx = torch.randint(0, n_cache, (args.batch_size,), device=device)
+            batch = activations_gpu[idx]
 
         # Forward
         recon, top_vals, top_idx = sae(batch)
@@ -261,11 +354,21 @@ def train(sae, activations, args, device):
                 cos_sim = F.cosine_similarity(batch, recon, dim=-1).mean()
                 n_dead_now = (~feature_fired).sum().item()
 
+                # Val metrics on held-out batch
+                sae.eval()
+                val_recon, _, _ = sae(val_batch)
+                val_rel_l2 = ((val_batch - val_recon).norm(dim=-1)
+                              / val_batch.norm(dim=-1)).mean()
+                val_cos = F.cosine_similarity(val_batch, val_recon, dim=-1).mean()
+                sae.train()
+
             entry = {
                 'step': step,
                 'loss': loss.item(),
                 'rel_l2': rel_l2.item(),
                 'cos_sim': cos_sim.item(),
+                'val_rel_l2': val_rel_l2.item(),
+                'val_cos': val_cos.item(),
                 'n_dead': n_dead_now,
                 'lr': scheduler.get_last_lr()[0],
             }
@@ -275,6 +378,7 @@ def train(sae, activations, args, device):
                 elapsed = time.time() - t_start
                 print(f"  Step {step:6d}: loss={loss.item():.6f}, "
                       f"rel_L2={rel_l2.item():.4f}, cos={cos_sim.item():.4f}, "
+                      f"val_cos={val_cos.item():.4f}, "
                       f"dead={n_dead_now}, lr={entry['lr']:.2e}, "
                       f"({elapsed:.0f}s)")
 
@@ -339,6 +443,12 @@ def main():
                         help='Reuse cached activations if available')
     parser.add_argument('--cache_path', default=None,
                         help='Path to cached activations (overrides default)')
+    parser.add_argument('--cache_fp16', action='store_true',
+                        help='Save cached activations in float16 to halve disk usage')
+    parser.add_argument('--max_samples', type=int, default=None,
+                        help='When reusing a cache, truncate to the first N samples.')
+    parser.add_argument('--val_frac', type=float, default=0.1,
+                        help='Fraction of cache held out for validation.')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -392,15 +502,19 @@ def main():
     plot_path = os.path.join(args.output_dir, "training_plot.png")
     make_plot(training_log, plot_path)
 
-    # ── Quick eval summary ───────────────────────────────────────────────
+    # ── Quick eval summary (held-out val tail) ───────────────────────────
+    val_frac = args.val_frac
+    n_total = activations.shape[0]
+    n_val = int(n_total * val_frac)
+    n_train = n_total - n_val
     sae.eval()
     with torch.no_grad():
-        eval_sample = activations[:10000].to(device)
+        eval_sample = activations[n_train:n_train + min(10000, n_val)].to(device).float()
         recon, _, _ = sae(eval_sample)
         mse = F.mse_loss(recon, eval_sample).item()
         rel_l2 = ((eval_sample - recon).norm(dim=-1) / eval_sample.norm(dim=-1)).mean().item()
         cos = F.cosine_similarity(eval_sample, recon, dim=-1).mean().item()
-    print(f"\nFinal eval (10k cache sample): MSE={mse:.6f}, rel_L2={rel_l2:.4f}, cos={cos:.4f}")
+    print(f"\nFinal eval (10k val sample): MSE={mse:.6f}, rel_L2={rel_l2:.4f}, cos={cos:.4f}")
 
 
 if __name__ == '__main__':

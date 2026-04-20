@@ -52,7 +52,8 @@ class GEGLU(nn.Module):
 # ── FlexAutoencoder ────────────────────────────────────────────────────
 
 class Block(nn.Module):
-    def __init__(self, d_in, d_out, activation='relu', norm='none', residual=False):
+    def __init__(self, d_in, d_out, activation='relu', norm='none', residual=False,
+                 dropout=0.0):
         super().__init__()
         self.residual = residual and (d_in == d_out)
 
@@ -71,9 +72,12 @@ class Block(nn.Module):
         else:
             self.norm = nn.Identity()
 
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+
     def forward(self, x):
         out = self.act(self.linear(x))
         out = self.norm(out)
+        out = self.dropout(out)
         if self.residual:
             out = out + x
         return out
@@ -84,7 +88,8 @@ class FlexAutoencoder(nn.Module):
 
     def __init__(self, d_in, k, hidden_dims, activation='relu',
                  norm='none', residual=False, bottleneck_noise=0.0,
-                 encoder_dims=None, decoder_dims=None, spectral_norm=False):
+                 encoder_dims=None, decoder_dims=None, spectral_norm=False,
+                 dropout=0.0):
         super().__init__()
         self.d_in = d_in
         self.k = k
@@ -100,7 +105,7 @@ class FlexAutoencoder(nn.Module):
         encoder_blocks = []
         prev = d_in
         for h in enc_dims:
-            block = Block(prev, h, activation, norm, residual)
+            block = Block(prev, h, activation, norm, residual, dropout=dropout)
             if spectral_norm:
                 block.linear = maybe_sn(block.linear)
             encoder_blocks.append(block)
@@ -112,7 +117,7 @@ class FlexAutoencoder(nn.Module):
         decoder_blocks = []
         prev = k
         for h in dec_dims:
-            block = Block(prev, h, activation, norm, residual)
+            block = Block(prev, h, activation, norm, residual, dropout=dropout)
             if spectral_norm:
                 block.linear = maybe_sn(block.linear)
             decoder_blocks.append(block)
@@ -330,6 +335,7 @@ def run_experiment(config, activations_raw, device):
             bottleneck_noise=config.get('bottleneck_noise', 0.0),
             encoder_dims=config.get('encoder_dims'),
             decoder_dims=config.get('decoder_dims'),
+            dropout=config.get('dropout', 0.0),
             spectral_norm=config.get('spectral_norm', False),
         ).to(device)
 
@@ -397,18 +403,26 @@ def run_experiment(config, activations_raw, device):
 
     grad_clip = config.get('grad_clip', 0)
 
-    # Training
-    n_cache = activations.shape[0]
-    activations_gpu = activations.to(device)
+    # Training — keep activations on CPU, batch to GPU to save VRAM
+    val_frac = config.get('val_frac', 0.1)
+    patience = config.get('patience', 5000)
+    val_interval = config.get('val_interval', 500)
+
+    n_total = activations.shape[0]
+    n_val = int(n_total * val_frac)
+    n_train = n_total - n_val
+    activations_train = activations[:n_train]  # stays on CPU
+    activations_val = activations[n_train:]    # stays on CPU
+
     t0 = time.time()
 
-    # For warm restarts: track best snapshot
-    best_snapshot = None
-    best_snapshot_cos = -1
+    best_val_cos = -1
+    best_state_dict = None
+    steps_since_improvement = 0
 
     for step in range(config['n_steps']):
-        idx = torch.randint(0, n_cache, (config['batch_size'],), device=device)
-        batch = activations_gpu[idx]
+        idx = torch.randint(0, n_train, (config['batch_size'],))
+        batch = activations_train[idx].to(device).float()
 
         recon, z = ae(batch)
         loss = compute_loss(recon, batch, z, config['loss'], device)
@@ -428,12 +442,43 @@ def run_experiment(config, activations_raw, device):
         if ema is not None:
             ema.update(ae)
 
-        if step % 1000 == 0:
+        # Validation + early stopping
+        if step % val_interval == 0:
+            ae.eval()
+            with torch.no_grad():
+                val_batch = activations_val[:10000].to(device).float()
+                val_recon, _ = ae(val_batch)
+                val_cos = F.cosine_similarity(val_batch, val_recon, dim=-1).mean().item()
+                train_cos = F.cosine_similarity(batch, recon, dim=-1).mean().item()
+
+            if step % 1000 == 0:
+                print(f"    Step {step:5d}: loss={loss.item():.6f}, "
+                      f"train_cos={train_cos:.4f}, val_cos={val_cos:.4f}")
+
+            if val_cos > best_val_cos:
+                best_val_cos = val_cos
+                best_state_dict = {k: v.cpu().clone() for k, v in ae.state_dict().items()}
+                steps_since_improvement = 0
+            else:
+                steps_since_improvement += val_interval
+
+            if steps_since_improvement >= patience and step > config.get('warmup_steps', 0):
+                print(f"    Early stopping at step {step} "
+                      f"(no improvement for {patience} steps, best val_cos={best_val_cos:.4f})")
+                break
+
+            ae.train()
+        elif step % 1000 == 0:
             with torch.no_grad():
                 cos = F.cosine_similarity(batch, recon, dim=-1).mean()
             print(f"    Step {step:5d}: loss={loss.item():.6f}, cos={cos.item():.4f}")
 
     elapsed = time.time() - t0
+
+    # Restore best checkpoint
+    if best_state_dict is not None:
+        ae.load_state_dict(best_state_dict)
+        print(f"  Restored best checkpoint (val_cos={best_val_cos:.4f})")
 
     # Apply EMA weights for eval if available
     original_state = None
@@ -444,14 +489,13 @@ def run_experiment(config, activations_raw, device):
     # Eval on raw activations
     ae.eval()
     with torch.no_grad():
-        eval_raw = activations_raw[:10000].to(device)
+        eval_raw = activations_raw[:10000].to(device).float()
         eval_input = eval_raw
         if config['preprocess'] != 'none':
-            # Use the full-dataset preprocessing state for consistency
             if config['preprocess'] == 'center':
-                eval_input = activations_raw[:10000].to(device) - pp_state['mean'].to(device)
+                eval_input = activations_raw[:10000].to(device).float() - pp_state['mean'].to(device)
             elif config['preprocess'] == 'whiten':
-                centered = activations_raw[:10000].to(device) - pp_state['mean'].to(device)
+                centered = activations_raw[:10000].to(device).float() - pp_state['mean'].to(device)
                 eval_input = centered @ pp_state['whiten_mat'].to(device)
 
         recon_pp, _ = ae(eval_input)
@@ -465,6 +509,19 @@ def run_experiment(config, activations_raw, device):
         ema.restore(ae, original_state)
 
     print(f"  Final: cos={cos_sim:.4f}, mse={mse:.6f}, rel_L2={rel_l2:.4f} ({elapsed:.0f}s)")
+
+    # Save model weights if requested
+    if config.get('save_model', False):
+        save_dir = config.get('save_dir', '.')
+        os.makedirs(save_dir, exist_ok=True)
+        save_data = {
+            'state_dict': ae.state_dict(),
+            'config': {k: v for k, v in config.items()
+                       if k not in ('save_model', 'save_dir')},
+        }
+        save_path = os.path.join(save_dir, f"{name}_model.pt")
+        torch.save(save_data, save_path)
+        print(f"  Saved model to {save_path}")
 
     return {
         'name': name,
@@ -527,6 +584,9 @@ BASELINE = {
     'n_steps': 10000,
     'batch_size': 4096,
     'decorr_weight': 0,
+    'val_frac': 0.1,
+    'patience': 5000,
+    'val_interval': 500,
     'seed': 42,
 }
 
@@ -674,6 +734,105 @@ ALL_EXPERIMENTS = {
     'best+film': {'activation': 'gelu', 'warmup_steps': 500,
                    'loss': {'type': 'mse+cosine', 'alpha': 5.0},
                    'film_decoder': True},
+
+    # ── Final comparison: k=32, 50k steps, save models ──
+
+    'final_mse+cos': {'k': 32, 'n_steps': 50000, 'activation': 'gelu',
+                       'warmup_steps': 500, 'grad_clip': 0.5,
+                       'loss': {'type': 'mse+cosine', 'alpha': 5.0},
+                       'save_model': True},
+
+    'final_mse': {'k': 32, 'n_steps': 50000, 'activation': 'gelu',
+                   'warmup_steps': 500, 'grad_clip': 0.5,
+                   'loss': {'type': 'mse'},
+                   'save_model': True},
+
+    # ── Doubled params (~134M) ──
+
+    'doubled_mse+cos': {'k': 32, 'n_steps': 50000, 'activation': 'gelu',
+                         'warmup_steps': 500, 'grad_clip': 0.5,
+                         'loss': {'type': 'mse+cosine', 'alpha': 5.0},
+                         'hidden_dims': [6400, 6400, 2048],
+                         'save_model': True},
+
+    'doubled_mse': {'k': 32, 'n_steps': 50000, 'activation': 'gelu',
+                     'warmup_steps': 500, 'grad_clip': 0.5,
+                     'loss': {'type': 'mse'},
+                     'hidden_dims': [6400, 6400, 2048],
+                     'save_model': True},
+
+    # ── Depth sweep (~134M params) ──
+
+    'deep4_mse': {'k': 32, 'n_steps': 50000, 'activation': 'gelu',
+                   'warmup_steps': 500, 'grad_clip': 0.5,
+                   'loss': {'type': 'mse'},
+                   'hidden_dims': [4800, 4800, 4800, 2048],
+                   'save_model': True},
+
+    'deep5_mse': {'k': 32, 'n_steps': 50000, 'activation': 'gelu',
+                   'warmup_steps': 500, 'grad_clip': 0.5,
+                   'loss': {'type': 'mse'},
+                   'hidden_dims': [4096, 4096, 4096, 4096, 2048],
+                   'save_model': True},
+
+    'deep8_mse': {'k': 32, 'n_steps': 50000, 'activation': 'gelu',
+                   'warmup_steps': 500, 'grad_clip': 0.5,
+                   'loss': {'type': 'mse'},
+                   'hidden_dims': [2816, 2816, 2816, 2816, 2816, 2816, 2816, 2048],
+                   'save_model': True},
+
+    # ── L10 overfitting sweep: more data + dropout ──
+
+    'l10_nodropout': {'k': 32, 'n_steps': 50000, 'activation': 'gelu',
+                      'warmup_steps': 500, 'grad_clip': 0.5,
+                      'loss': {'type': 'mse'},
+                      'save_model': True},
+
+    'l10_dropout': {'k': 32, 'n_steps': 50000, 'activation': 'gelu',
+                    'warmup_steps': 500, 'grad_clip': 0.5,
+                    'loss': {'type': 'mse'},
+                    'dropout': 0.1,
+                    'save_model': True},
+
+    # ── L10 scaling sweep: more data + dropout + 200k steps ──
+
+    'l10_1M_drop': {'k': 32, 'n_steps': 200000, 'activation': 'gelu',
+                    'warmup_steps': 500, 'grad_clip': 0.5,
+                    'loss': {'type': 'mse'},
+                    'dropout': 0.1,
+                    'patience': 2000,
+                    'save_model': True},
+
+    'l10_2M_drop': {'k': 32, 'n_steps': 200000, 'activation': 'gelu',
+                    'warmup_steps': 500, 'grad_clip': 0.5,
+                    'loss': {'type': 'mse'},
+                    'dropout': 0.1,
+                    'patience': 2000,
+                    'save_model': True},
+
+    'l10_4M_drop': {'k': 32, 'n_steps': 200000, 'activation': 'gelu',
+                    'warmup_steps': 500, 'grad_clip': 0.5,
+                    'loss': {'type': 'mse'},
+                    'dropout': 0.1,
+                    'save_model': True},
+
+    'l10_6M_drop': {'k': 32, 'n_steps': 200000, 'activation': 'gelu',
+                    'warmup_steps': 500, 'grad_clip': 0.5,
+                    'loss': {'type': 'mse'},
+                    'dropout': 0.1,
+                    'save_model': True},
+
+    'l10_8M_drop': {'k': 32, 'n_steps': 200000, 'activation': 'gelu',
+                    'warmup_steps': 500, 'grad_clip': 0.5,
+                    'loss': {'type': 'mse'},
+                    'dropout': 0.1,
+                    'save_model': True},
+
+    'l10_10M_drop': {'k': 32, 'n_steps': 200000, 'activation': 'gelu',
+                     'warmup_steps': 500, 'grad_clip': 0.5,
+                     'loss': {'type': 'mse'},
+                     'dropout': 0.1,
+                     'save_model': True},
 }
 
 
@@ -685,14 +844,30 @@ def main():
     parser.add_argument('--output_dir', default='results/trained_autoencoder/hillclimb')
     parser.add_argument('--experiments', nargs='+', default=None,
                         help='Which experiments to run (default: all)')
+    parser.add_argument('--max_samples', type=int, default=None,
+                        help='If set, only use the first N rows of the cache.')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     print(f"Loading activations from {args.cache_path}...")
-    activations_raw = torch.load(args.cache_path, weights_only=True).float()
-    print(f"  Shape: {activations_raw.shape}")
+    meta_path = args.cache_path + '.meta.json'
+    if os.path.exists(meta_path):
+        with open(meta_path) as f:
+            meta = json.load(f)
+        shape = tuple(meta['shape'])
+        np_dtype = np.dtype(meta['dtype'])
+        mm = np.memmap(args.cache_path, dtype=np_dtype, mode='r', shape=shape)
+        # Keep memmap-backed; training loop will cast batches to float at GPU time.
+        activations_raw = torch.from_numpy(mm)
+    else:
+        activations_raw = torch.load(args.cache_path, weights_only=True).float()
+    print(f"  Shape: {activations_raw.shape}, dtype: {activations_raw.dtype}")
+
+    if args.max_samples is not None and args.max_samples < activations_raw.shape[0]:
+        activations_raw = activations_raw[:args.max_samples]
+        print(f"  Truncated to first {args.max_samples} samples -> {activations_raw.shape}")
 
     # Select experiments
     if args.experiments:
@@ -706,7 +881,7 @@ def main():
             print(f"Unknown experiment: {name}, skipping")
             continue
 
-        config = {**BASELINE, 'name': name, **ALL_EXPERIMENTS[name]}
+        config = {**BASELINE, 'name': name, 'save_dir': args.output_dir, **ALL_EXPERIMENTS[name]}
 
         print(f"\n{'='*60}")
         print(f"[{i+1}/{len(exp_names)}] {name}")

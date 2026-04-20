@@ -4,6 +4,8 @@ Data loading and sampling utilities for activation plateau analysis.
 Provides FineWeb loading and covariance-matched random activation sampling.
 """
 
+import time
+
 import torch
 import numpy as np
 from datasets import load_dataset
@@ -219,24 +221,47 @@ def load_fineweb_fixed_length(n, tokenizer, seq_len=5, seed=42, cache_dir="/work
     dataset = dataset.shuffle(seed=seed, buffer_size=10000)
 
     token_ids_list = []
+    batch_size = 1000  # tokenize in batches for speed
+    text_batch = []
+    t0 = time.time()
 
     for sample in dataset:
-        text = sample['text']
-        tokens = tokenizer(text, truncation=True, max_length=seq_len,
-                          add_special_tokens=add_special_tokens,
-                          return_tensors='pt')
-        ids = tokens['input_ids'].squeeze(0)
+        text_batch.append(sample['text'])
 
-        if len(ids) >= seq_len:
-            token_ids_list.append(ids[:seq_len])
+        if len(text_batch) >= batch_size:
+            # Batch tokenize
+            batch_tokens = tokenizer(text_batch, truncation=True, max_length=seq_len,
+                                     add_special_tokens=add_special_tokens,
+                                     padding=False)
+            for ids in batch_tokens['input_ids']:
+                if len(ids) >= seq_len:
+                    token_ids_list.append(torch.tensor(ids[:seq_len]))
+                    if len(token_ids_list) >= n:
+                        break
+            text_batch = []
 
-        if len(token_ids_list) >= n:
-            break
+            if len(token_ids_list) >= n:
+                break
 
-        if len(token_ids_list) % 10000 == 0 and len(token_ids_list) > 0:
-            print(f"  Collected {len(token_ids_list)}/{n} sequences...")
+            if len(token_ids_list) % 100000 == 0 and len(token_ids_list) > 0:
+                rate = len(token_ids_list) / (time.time() - t0)
+                remaining = (n - len(token_ids_list)) / rate
+                print(f"  Collected {len(token_ids_list)}/{n} sequences "
+                      f"({rate:.0f}/s, ~{remaining:.0f}s remaining)...")
 
-    print(f"Loaded {len(token_ids_list)} FineWeb samples (each {seq_len} tokens)")
+    # Process any remaining texts
+    if text_batch and len(token_ids_list) < n:
+        batch_tokens = tokenizer(text_batch, truncation=True, max_length=seq_len,
+                                 add_special_tokens=add_special_tokens,
+                                 padding=False)
+        for ids in batch_tokens['input_ids']:
+            if len(ids) >= seq_len:
+                token_ids_list.append(torch.tensor(ids[:seq_len]))
+                if len(token_ids_list) >= n:
+                    break
+
+    elapsed = time.time() - t0
+    print(f"Loaded {len(token_ids_list)} FineWeb samples (each {seq_len} tokens) in {elapsed:.0f}s")
 
     # Save to cache for future use
     if cache_dir and len(token_ids_list) == n:
