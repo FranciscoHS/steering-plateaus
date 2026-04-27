@@ -1,0 +1,44 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{microtype}
+\DeclareMathOperator{\tr}{tr}
+
+\title{Corollary: what our results say about error correction}
+\date{}
+
+\begin{document}
+\maketitle
+
+Error correction, if the model performs it on the activation stream, exists to tell signal from noise: perturbations along feature directions should be let through, perturbations orthogonal to them should be suppressed.
+Under superposition ($M > D$, $M$ number of features, $D$ residual stream dimension) the features span $\mathbb{R}^D$, so every perturbation $v$ decomposes as
+\[
+v = \sum_{i=1}^M c_i d_i, \qquad c_i = c_i(v),
+\]
+with generically nonzero coefficients. EC therefore has to act on these coefficients. Two natural schemes:
+
+\begin{enumerate}
+\item \textbf{Per-feature thresholds.} Each feature carries its own tolerance $\tau_i$; a perturbation $v$ triggers a response iff $|c_i| > \tau_i$ for some $i$. This corresponds to the $n \to \infty$ limit of our functional form $R(v) = F\!\left(\sum_i w_i |d_i^\top v|^n\right)$ and predicts square iso-plateaus.
+
+\item \textbf{Aggregate threshold.} The model tolerates perturbations with small total feature content and rejects those with large total. Response governed by
+\[
+R(v) = F(v^\top A v), \qquad A = \sum_{i=1}^M w_i\, d_i d_i^\top \succeq 0,
+\]
+i.e.\ a single threshold on the scalar $v^\top A v$. This is the $n = 2$ case and predicts circular (normalized) iso-plateaus.
+\end{enumerate}
+
+Empirically we find $n \approx 2$, which rules out the per-feature-threshold scheme. The aggregate scheme is not by itself falsified by the iso-plateau shape.
+
+\medskip
+\noindent\textbf{The tension with aggregate EC under superposition.} The direction along which a perturbation crosses the response threshold at the smallest magnitude is the top eigenvector $u^*$ of $A$. By Rayleigh,
+\[
+u^{*\top} A u^* \;=\; \lambda_{\max}(A) \;\geq\; d_j^\top A d_j \quad \text{for every feature } j.
+\]
+Under $M > D$ with generic feature geometry, $u^*$ does not coincide with any $d_j$ --- that would be a measure-zero alignment among $M$ unit vectors in $D$-dimensional space. So the model's \emph{easiest} breaking direction is not a feature.
+
+That is the opposite of what error correction is for. EC is supposed to pick out features as the directions of signal, making them the directions along which perturbations matter. Our results force features to be \emph{less} sensitive than a specific non-feature direction: the model's output changes faster along a direction nobody would call a feature than along any feature it is built from.
+
+\medskip
+\noindent\textbf{Summary.} The narrow claim our results cleanly support is that the model is not performing per-feature threshold error correction. The broader claim --- that the model is not performing \emph{any} error-correcting scheme that privileges features as the maximally-sensitive directions of the activation space --- requires only the operational definition ``EC privileges features as signal.'' This avoids any universal quantifier over features or any strong reading of the Linear Representation Hypothesis. It just says EC's job is to make features stand out as signal, and our data shows features do not stand out: a non-feature direction is uniformly more sensitive than every feature.
+
+\end{document}

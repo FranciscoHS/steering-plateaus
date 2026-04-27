@@ -35,6 +35,8 @@ parser.add_argument('--seq_len', type=int, default=5)
 parser.add_argument('--seed', type=int, default=42)
 parser.add_argument('--bfloat16', action='store_true',
                     help='Load model in bfloat16 (needed for larger models on 24GB)')
+parser.add_argument('--out_dir', default=None,
+                    help='Override output directory (default: results/allpairs_contrastive/{model})')
 args = parser.parse_args()
 
 MODEL = args.model
@@ -106,11 +108,12 @@ def build_perturbed_hidden(contexts, activations, direction, angle_rad):
 
 def sweep_single_direction(model, contexts, activations, ref_measure, ref_log_probs,
                            direction, angles_rad, layer, measure_layer, device):
-    """Perturbation sweep for one fixed direction. KL from logits, L2 at measure_layer."""
+    """Perturbation sweep for one fixed direction. KL from logits; L2 and cos at measure_layer."""
     N = activations.shape[0]
     n_angles = len(angles_rad)
     kl_divs = np.zeros((N, n_angles))
     l2_dists = np.zeros((N, n_angles))
+    cos_dists = np.zeros((N, n_angles))
     direction_dev = direction.to(device)
     for ang_idx, theta in enumerate(angles_rad):
         with torch.no_grad():
@@ -118,10 +121,12 @@ def sweep_single_direction(model, contexts, activations, ref_measure, ref_log_pr
             pert_measure, pert_logits = forward_with_measure(model, hidden, layer, measure_layer)
             pert_log_probs = F.log_softmax(pert_logits, dim=-1)
             l2 = (pert_measure - ref_measure).norm(dim=-1)
+            cos = 1.0 - F.cosine_similarity(ref_measure, pert_measure, dim=-1)
             kl = (ref_log_probs.exp() * (ref_log_probs - pert_log_probs)).sum(dim=-1)
             l2_dists[:, ang_idx] = l2.float().cpu().numpy()
+            cos_dists[:, ang_idx] = cos.float().cpu().numpy()
             kl_divs[:, ang_idx] = kl.float().cpu().numpy()
-    return kl_divs, l2_dists
+    return kl_divs, l2_dists, cos_dists
 
 
 def sweep_random_directions(model, contexts, activations, ref_measure, ref_log_probs,
@@ -131,6 +136,7 @@ def sweep_random_directions(model, contexts, activations, ref_measure, ref_log_p
     n_angles = len(angles_rad)
     kl_divs = np.zeros((N, n_angles, n_dirs))
     l2_dists = np.zeros((N, n_angles, n_dirs))
+    cos_dists = np.zeros((N, n_angles, n_dirs))
     a_norms = activations.norm(dim=-1, keepdim=True)
     a_unit = activations / a_norms
 
@@ -153,10 +159,12 @@ def sweep_random_directions(model, contexts, activations, ref_measure, ref_log_p
                     model, hidden, layer, measure_layer)
                 pert_log_probs = F.log_softmax(pert_logits, dim=-1)
                 l2 = (pert_measure - ref_measure).norm(dim=-1)
+                cos = 1.0 - F.cosine_similarity(ref_measure, pert_measure, dim=-1)
                 kl = (ref_log_probs.exp() * (ref_log_probs - pert_log_probs)).sum(dim=-1)
                 l2_dists[:, ang_idx, dir_idx] = l2.float().cpu().numpy()
+                cos_dists[:, ang_idx, dir_idx] = cos.float().cpu().numpy()
                 kl_divs[:, ang_idx, dir_idx] = kl.float().cpu().numpy()
-    return kl_divs, l2_dists
+    return kl_divs, l2_dists, cos_dists
 
 
 # ============================================================
@@ -175,7 +183,7 @@ if args.bfloat16:
     print("  Loaded in bfloat16")
 n_layers = len(_get_blocks(model))
 MEASURE_LAYER = args.measure_layer if args.measure_layer is not None else n_layers - 2
-results_dir = f'results/allpairs_contrastive/{MODEL}'
+results_dir = args.out_dir if args.out_dir else f'results/allpairs_contrastive/{MODEL}'
 print(f"  {n_layers} layers, measure_layer={MEASURE_LAYER}")
 
 # === Phase 1: Extract activations for all languages ===
@@ -270,10 +278,10 @@ sweep_results = {}
 for lang in LANGUAGES:
     name = f"+{lang}"
     print(f"  Sweeping {name}...")
-    kl, l2 = sweep_single_direction(
+    kl, l2, cos = sweep_single_direction(
         model, contexts, activations, ref_measure, ref_log_probs,
         features[lang], angles_rad, LAYER, MEASURE_LAYER, device)
-    sweep_results[name] = {'kl': kl, 'l2': l2}
+    sweep_results[name] = {'kl': kl, 'l2': l2, 'cos': cos}
     peak_kl = kl.mean(axis=0).max()
     peak_angle = angles_deg[kl.mean(axis=0).argmax()]
     print(f"    peak KL = {peak_kl:.3f} at {peak_angle:.0f}°")
@@ -283,20 +291,20 @@ print(f"\nSweeping negative directions...")
 for lang in LANGUAGES:
     name = f"-{lang}"
     print(f"  Sweeping {name}...")
-    kl, l2 = sweep_single_direction(
+    kl, l2, cos = sweep_single_direction(
         model, contexts, activations, ref_measure, ref_log_probs,
         -features[lang], angles_rad, LAYER, MEASURE_LAYER, device)
-    sweep_results[name] = {'kl': kl, 'l2': l2}
+    sweep_results[name] = {'kl': kl, 'l2': l2, 'cos': cos}
     peak_kl = kl.mean(axis=0).max()
     peak_angle = angles_deg[kl.mean(axis=0).argmax()]
     print(f"    peak KL = {peak_kl:.3f} at {peak_angle:.0f}°")
 
 # Sweep random directions
 print("\nSweeping random directions (10 dirs per activation)...")
-rand_kl, rand_l2 = sweep_random_directions(
+rand_kl, rand_l2, rand_cos = sweep_random_directions(
     model, contexts, activations, ref_measure, ref_log_probs,
     angles_rad, LAYER, MEASURE_LAYER, device, n_dirs=10)
-sweep_results['random'] = {'kl': rand_kl, 'l2': rand_l2}
+sweep_results['random'] = {'kl': rand_kl, 'l2': rand_l2, 'cos': rand_cos}
 print(f"  random KL shape: {rand_kl.shape}")
 
 # === Phase 6: Save ===
@@ -338,40 +346,43 @@ cmap = plt.cm.tab10
 mask = angles_deg <= 60
 
 # --- Plot 1: Positive directions ---
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+fig, (ax_c, ax2, ax1) = plt.subplots(1, 3, figsize=(18, 5))
 for i, lang in enumerate(LANGUAGES):
     name = f"+{lang}"
     kl = sweep_results[name]['kl'][:, mask]
     l2 = sweep_results[name]['l2'][:, mask]
-    ax1.plot(angles_deg[mask], kl.mean(axis=0), color=cmap(i), label=lang, linewidth=1.5)
+    cos = sweep_results[name]['cos'][:, mask]
+    ax_c.plot(angles_deg[mask], cos.mean(axis=0), color=cmap(i), label=lang, linewidth=1.5)
     ax2.plot(angles_deg[mask], l2.mean(axis=0), color=cmap(i), label=lang, linewidth=1.5)
+    ax1.plot(angles_deg[mask], kl.mean(axis=0), color=cmap(i), label=lang, linewidth=1.5)
 
 # Random baseline
 rand_kl_avg = rand_kl[:, mask, :].mean(axis=2)
 rand_l2_avg = rand_l2[:, mask, :].mean(axis=2)
-ax1.plot(angles_deg[mask], rand_kl_avg.mean(axis=0), '-', color='gray',
-         label='random', linewidth=1.5)
-ax1.fill_between(angles_deg[mask],
-                 rand_kl_avg.mean(axis=0) - rand_kl_avg.std(axis=0),
-                 rand_kl_avg.mean(axis=0) + rand_kl_avg.std(axis=0),
-                 color='gray', alpha=0.15)
-ax2.plot(angles_deg[mask], rand_l2_avg.mean(axis=0), '-', color='gray',
-         label='random', linewidth=1.5)
-ax2.fill_between(angles_deg[mask],
-                 rand_l2_avg.mean(axis=0) - rand_l2_avg.std(axis=0),
-                 rand_l2_avg.mean(axis=0) + rand_l2_avg.std(axis=0),
-                 color='gray', alpha=0.15)
+rand_cos_avg = rand_cos[:, mask, :].mean(axis=2)
+for ax, arr in [(ax_c, rand_cos_avg), (ax2, rand_l2_avg), (ax1, rand_kl_avg)]:
+    ax.plot(angles_deg[mask], arr.mean(axis=0), '-', color='gray',
+            label='random', linewidth=1.5)
+    ax.fill_between(angles_deg[mask],
+                    arr.mean(axis=0) - arr.std(axis=0),
+                    arr.mean(axis=0) + arr.std(axis=0),
+                    color='gray', alpha=0.15)
 
-ax1.set_xlabel('Perturbation angle (°)')
-ax1.set_ylabel('Mean KL divergence')
-ax1.set_title('KL divergence (from final logits)')
-ax1.legend(fontsize=7, ncol=2)
-ax1.grid(True, alpha=0.3)
+ax_c.set_xlabel('Perturbation angle (°)')
+ax_c.set_ylabel('Mean cosine distance')
+ax_c.set_title(f'Cosine distance (layer {MEASURE_LAYER})')
+ax_c.legend(fontsize=7, ncol=2)
+ax_c.grid(True, alpha=0.3)
 ax2.set_xlabel('Perturbation angle (°)')
 ax2.set_ylabel('Mean L2 distance')
 ax2.set_title(f'L2 distance (layer {MEASURE_LAYER})')
 ax2.legend(fontsize=7, ncol=2)
 ax2.grid(True, alpha=0.3)
+ax1.set_xlabel('Perturbation angle (°)')
+ax1.set_ylabel('Mean KL divergence')
+ax1.set_title('KL divergence (from final logits)')
+ax1.legend(fontsize=7, ncol=2)
+ax1.grid(True, alpha=0.3)
 fig.suptitle('Positive feature directions (+f̂_i: toward language)\n'
              f'{MODEL}, layer {LAYER}', fontsize=12)
 fig.tight_layout()
@@ -379,37 +390,39 @@ fig.savefig(os.path.join(results_dir, 'sweeps_positive.png'), dpi=150, bbox_inch
 print(f"  Saved: {results_dir}/sweeps_positive.png")
 
 # --- Plot 2: Negative directions ---
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+fig, (ax_c, ax2, ax1) = plt.subplots(1, 3, figsize=(18, 5))
 for i, lang in enumerate(LANGUAGES):
     name = f"-{lang}"
     kl = sweep_results[name]['kl'][:, mask]
     l2 = sweep_results[name]['l2'][:, mask]
-    ax1.plot(angles_deg[mask], kl.mean(axis=0), color=cmap(i), label=lang, linewidth=1.5)
+    cos = sweep_results[name]['cos'][:, mask]
+    ax_c.plot(angles_deg[mask], cos.mean(axis=0), color=cmap(i), label=lang, linewidth=1.5)
     ax2.plot(angles_deg[mask], l2.mean(axis=0), color=cmap(i), label=lang, linewidth=1.5)
+    ax1.plot(angles_deg[mask], kl.mean(axis=0), color=cmap(i), label=lang, linewidth=1.5)
 
-ax1.plot(angles_deg[mask], rand_kl_avg.mean(axis=0), '-', color='gray',
-         label='random', linewidth=1.5)
-ax1.fill_between(angles_deg[mask],
-                 rand_kl_avg.mean(axis=0) - rand_kl_avg.std(axis=0),
-                 rand_kl_avg.mean(axis=0) + rand_kl_avg.std(axis=0),
-                 color='gray', alpha=0.15)
-ax2.plot(angles_deg[mask], rand_l2_avg.mean(axis=0), '-', color='gray',
-         label='random', linewidth=1.5)
-ax2.fill_between(angles_deg[mask],
-                 rand_l2_avg.mean(axis=0) - rand_l2_avg.std(axis=0),
-                 rand_l2_avg.mean(axis=0) + rand_l2_avg.std(axis=0),
-                 color='gray', alpha=0.15)
+for ax, arr in [(ax_c, rand_cos_avg), (ax2, rand_l2_avg), (ax1, rand_kl_avg)]:
+    ax.plot(angles_deg[mask], arr.mean(axis=0), '-', color='gray',
+            label='random', linewidth=1.5)
+    ax.fill_between(angles_deg[mask],
+                    arr.mean(axis=0) - arr.std(axis=0),
+                    arr.mean(axis=0) + arr.std(axis=0),
+                    color='gray', alpha=0.15)
 
-ax1.set_xlabel('Perturbation angle (°)')
-ax1.set_ylabel('Mean KL divergence')
-ax1.set_title('KL divergence (from final logits)')
-ax1.legend(fontsize=7, ncol=2)
-ax1.grid(True, alpha=0.3)
+ax_c.set_xlabel('Perturbation angle (°)')
+ax_c.set_ylabel('Mean cosine distance')
+ax_c.set_title(f'Cosine distance (layer {MEASURE_LAYER})')
+ax_c.legend(fontsize=7, ncol=2)
+ax_c.grid(True, alpha=0.3)
 ax2.set_xlabel('Perturbation angle (°)')
 ax2.set_ylabel('Mean L2 distance')
 ax2.set_title(f'L2 distance (layer {MEASURE_LAYER})')
 ax2.legend(fontsize=7, ncol=2)
 ax2.grid(True, alpha=0.3)
+ax1.set_xlabel('Perturbation angle (°)')
+ax1.set_ylabel('Mean KL divergence')
+ax1.set_title('KL divergence (from final logits)')
+ax1.legend(fontsize=7, ncol=2)
+ax1.grid(True, alpha=0.3)
 fig.suptitle('Negative feature directions (-f̂_i: away from language)\n'
              f'{MODEL}, layer {LAYER}', fontsize=12)
 fig.tight_layout()

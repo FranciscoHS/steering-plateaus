@@ -1,0 +1,86 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{microtype}
+\usepackage{parskip}
+
+\title{Note: general-$B$ fit for the 10-direction plateau experiment}
+\author{}
+\date{}
+
+\newcommand{\RR}{\mathbb{R}}
+\newcommand{\tr}{\operatorname{tr}}
+
+\begin{document}
+\maketitle
+
+\section{Setup}
+
+The proposed response function is $R(v) = F(S(v))$ with
+$S(v) = \sum_i w_i \lvert d_i^\top v\rvert^n$,
+for unknown unit features $\{d_i\}$, weights $w_i \ge 0$, convex monotonic $F$, and exponent $n$. For $n=2$ this collapses to a quadratic form $S(v) = v^\top A v$ with $A = \sum_i w_i d_i d_i^\top \succeq 0$.
+
+We perturb along $K$ orthonormal directions $\hat e_1, \dots, \hat e_K$ (random, Gram--Schmidt'd against the activation) and combinations $v = \mu \sum_j c_j \hat e_j$ with unit $\|c\|=1$ and scale $\mu = \sin\alpha$ (on-sphere parametrisation). In the $\hat e_j$ basis,
+\[
+  S(v) \;=\; \mu^2 \, c^\top B c, \qquad B \;:=\; \hat E A \hat E^\top \in \RR^{K\times K},
+\]
+where $\hat E$ has rows $\hat e_j$. The plateau-breaking condition $R(v) = R_c$ (equivalently $S = S_c = F^{-1}(R_c)$) reads
+\[
+  \sin^2(\alpha) \, c^\top B c \;=\; S_c.
+\]
+So in $c$-space the iso-breaking surface is an ellipsoid $c^\top B c = \text{const}$ --- tilted in general.
+
+\section{What ``axis-aligned'' assumes}
+
+Given individual breakings $\alpha_j^*$ (perturbing along $\hat e_j$ alone, so $c = \mathbf{e}_j$):
+\[
+  \sin^2(\alpha_j^*) \, B_{jj} \;=\; S_c
+  \;\;\Longrightarrow\;\;
+  B_{jj} \;=\; S_c / \sin^2(\alpha_j^*).
+\]
+The axis-aligned fit uses only the diagonal of $B$ and predicts, for combination $c$,
+\[
+  \sin^2(\alpha^{\text{axis}}_c) \sum_{j} c_j^2 B_{jj} \;=\; S_c
+  \;\;\Longleftrightarrow\;\;
+  \sum_j \left(\frac{c_j \sin\alpha^{\text{axis}}_c}{\sin\alpha_j^*}\right)^2 \;=\; 1.
+\]
+This is the ``superellipsoid with $n=2$'' prediction. It is only exact if $B$ is diagonal, i.e.\ if the $\hat e_j$ are $A$-orthogonal --- essentially eigenvectors of $A$.
+
+For \emph{random} $\hat e_j$'s, $B$ has substantial off-diagonals $B_{jk} = \hat e_j^\top A \hat e_k$. The true breaking,
+\[
+  \sin^2(\alpha_c) \bigg(\sum_j c_j^2 B_{jj} + 2\sum_{j<k} c_j c_k B_{jk}\bigg) = S_c,
+\]
+differs from the axis-aligned prediction by the cross-term. Since $c_j c_k$ has random sign across combinations, this acts like additive noise on top of the axis-aligned prediction and accounts for the scatter we observe around $y=x$ in the predicted-vs-measured plot.
+
+\section{The general-$B$ fit}
+
+We can fit all of $B$ (or equivalently $M := B/S_c$), not just its diagonal, from the combination data. Pinning the diagonal from individual sweeps, $M_{jj} = 1/\sin^2(\alpha_j^*)$, the remaining $K(K{-}1)/2$ off-diagonals satisfy
+\[
+  \underbrace{\frac{1}{\sin^2(\alpha_c^{(m)})} \;-\; \sum_j (c_j^{(m)})^2\, M_{jj}}_{y_m}
+  \;=\;
+  2 \sum_{j<k} c_j^{(m)} c_k^{(m)} \, M_{jk},
+\]
+a \emph{linear} system in the unknowns $\{M_{jk}\}_{j<k}$. With $N$ combinations, it is a least-squares problem with $N$ equations and $K(K{-}1)/2$ unknowns; over-determined once $N$ exceeds that count (for $K=10$ we need $N > 45$).
+
+The fit quality is reported two ways: (i)~the rhs-residual RMS relative to the rhs standard deviation (fraction of $y$-variance not explained by off-diagonals), and (ii)~the predicted-vs-measured breaking-angle plot using $\alpha_c^{\text{gen}} = \arcsin\bigl(1/\sqrt{c^\top M c}\bigr)$.
+
+\section{What this tests}
+
+\begin{itemize}
+  \item If the form holds with $n=2$, a general-$B$ fit should recover a single PSD $B$ that explains \emph{all} combinations up to measurement noise, and residuals should be small.
+  \item If residuals are large, one of three things is off: $n \ne 2$ (so $B$ itself is not the right structural object); the form is not of the posited shape; or the threshold-crossing measurements are noisy enough to inflate residuals independent of the form.
+  \item The axis-aligned fit cannot distinguish ``form is wrong'' from ``our basis isn't feature-aligned.'' The general-$B$ fit can: it allows non-axis-aligned tilt, so what remains unexplained is attributable to noise or to a mis-specified $n$.
+\end{itemize}
+
+\section{Should it go in the write-up?}
+
+My recommendation is \textbf{no for the 2-page doc, yes as a companion note} (e.g.\ this one, or an appendix). Reasoning:
+\begin{itemize}
+  \item The lead story wants to be: ``the pair iso-plateau gives $n=2$; the $K{=}10$ axis-aligned fit also gives $n\approx 2$; both are cleanly consistent with the form. The corollary is the universal-LRH impossibility.''
+  \item Introducing $B$, its diagonal approximation, and its general fit is a real second-step idea that needs three--four sentences to land. It distracts from a doc whose purpose is to motivate Dmitry/Lucius to engage.
+  \item The general-$B$ fit becomes useful \emph{if someone pushes back} with ``how do you know the residuals aren't telling you the form is wrong?''. Then the answer is: ``we also did the general-$B$ fit and the form is consistent at $n=2$ with fit residuals of order measurement noise.'' That belongs in an appendix or a backup slide, not in the 2-pager.
+\end{itemize}
+
+Short version: in the 2-pager, cite the axis-aligned $\hat n$ as the headline number and footnote that a more flexible fit (here) reduces unexplained scatter, keeping the detail in the companion.
+
+\end{document}

@@ -1,0 +1,53 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{microtype}
+\usepackage{parskip}
+
+\title{Universal LRH is impossible with an $n=2$ response function}
+\author{}
+\date{}
+
+\newcommand{\tr}{\operatorname{tr}}
+\newcommand{\RR}{\mathbb{R}}
+
+\begin{document}
+\maketitle
+
+\section{Setup}
+
+Activation space $\RR^D$. Response function $R(v) = F(S(v))$ with $F$ convex and monotonic, and
+\[
+  S(v) \;=\; \sum_{i=1}^M w_i (d_i^\top v)^2 \;=\; v^\top A v,
+  \qquad A \;:=\; \sum_{i=1}^M w_i\, d_i d_i^\top \;\in\; \RR^{D\times D}.
+\]
+Here $\{d_i\}_{i=1}^M \subset \RR^D$ are unit feature directions with $M > D$ (superposition; we assume the features span $\RR^D$), and $w_i \ge 0$ are weights. The plateau is $\{v : S(v) < c\}$. Along a unit direction $d$, the perturbation magnitude that breaks the plateau is
+\[
+  m_d \;=\; \sqrt{c/q_d}, \qquad q_d \;:=\; d^\top A d.
+\]
+Smaller $q_d$ $\Leftrightarrow$ larger $m_d$ $\Leftrightarrow$ plateau harder to break along $d$. Write $q_i := q_{d_i}$.
+
+\section{Universal LRH}
+
+\emph{Universal linear representation hypothesis:} every feature direction is strictly more sensitive (strictly smaller $m$, strictly larger $q$) than every non-feature unit direction:
+\[
+  q_i \;>\; q_d \qquad \text{for every feature $i$ and every unit $d \notin \{d_1,\dots,d_M\}$.}
+\]
+
+\section{Impossibility}
+
+\textbf{Claim.} For any weights $\{w_i\}_{i=1}^M$ and any threshold $c > 0$, universal LRH fails.
+
+\textbf{Proof.} $A \succeq 0$. For any symmetric $A \in \RR^{D\times D}$ with largest eigenvalue $\lambda_{\max}(A)$, the Rayleigh quotient $d \mapsto d^\top A d$ on the unit sphere attains its maximum exactly on the top eigenspace $V := \ker(\lambda_{\max}(A)\, I - A)$:
+\[
+  q_d \;=\; d^\top A d \;\le\; \lambda_{\max}(A) \qquad \text{for every unit } d \in \RR^D,
+\]
+with equality iff $d \in V$. Let $r := \dim V \ge 1$.
+
+\emph{Case $r < D$.} The features span $\RR^D$, so some feature $d_{i^*} \notin V$; hence $q_{i^*} < \lambda_{\max}(A)$. The unit sphere of $V$ is infinite while the feature set is finite, so some unit $u \in V$ is not a feature direction. For that $u$, $q_u = \lambda_{\max}(A) > q_{i^*}$, contradicting universal LRH on feature $i^*$.
+
+\emph{Case $r = D$.} Then $A = \lambda_{\max}(A)\, I$ and $q_d = \lambda_{\max}(A)$ for every unit $d$, so the strict inequality fails for every feature.
+
+Either way, universal LRH fails. $\square$
+
+\end{document}

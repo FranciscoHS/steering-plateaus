@@ -747,6 +747,20 @@ ALL_EXPERIMENTS = {
                    'loss': {'type': 'mse'},
                    'save_model': True},
 
+    # L10 bottleneck sweep — clone of final_mse with k swapped
+    'l10_k5':  {'k': 5,  'n_steps': 50000, 'activation': 'gelu',
+                'warmup_steps': 500, 'grad_clip': 0.5,
+                'loss': {'type': 'mse'}, 'save_model': True},
+    'l10_k10': {'k': 10, 'n_steps': 50000, 'activation': 'gelu',
+                'warmup_steps': 500, 'grad_clip': 0.5,
+                'loss': {'type': 'mse'}, 'save_model': True},
+    'l10_k20': {'k': 20, 'n_steps': 50000, 'activation': 'gelu',
+                'warmup_steps': 500, 'grad_clip': 0.5,
+                'loss': {'type': 'mse'}, 'save_model': True},
+    'l10_k40': {'k': 40, 'n_steps': 50000, 'activation': 'gelu',
+                'warmup_steps': 500, 'grad_clip': 0.5,
+                'loss': {'type': 'mse'}, 'save_model': True},
+
     # ── Doubled params (~134M) ──
 
     'doubled_mse+cos': {'k': 32, 'n_steps': 50000, 'activation': 'gelu',

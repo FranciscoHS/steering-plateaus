@@ -6,7 +6,10 @@ Uses HuggingFace transformers directly.
 """
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, GPT2LMHeadModel, GPT2Tokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
+# GPT2LMHeadModel + GPT2Tokenizer imported lazily inside the gpt2 branch below
+# (importing them at top level pulls in transformers' vision deps via lazy loader,
+# which fails when torch/torchvision versions don't match)
 
 
 # Short names → HuggingFace model IDs
@@ -35,6 +38,9 @@ MODEL_ALIASES = {
     'pythia-1.4b': 'EleutherAI/pythia-1.4b',
     'olmo-1b': 'allenai/OLMo-1B-hf',
     'olmo-7b': 'allenai/OLMo-7B-0724-hf',
+    'mistral-7b-v0.3': 'mistralai/Mistral-7B-v0.3',
+    'aya-expanse-8b': 'CohereForAI/aya-expanse-8b',
+    'yi-1.5-9b': '01-ai/Yi-1.5-9B',
     'tinystories-28m': 'roneneldan/TinyStories-28M',
     'chess_16L': 'lichess_16layers_ckpt_no_optimizer.pt',
     'chess_8L': 'lichess_8layers_ckpt_no_optimizer.pt',
@@ -212,6 +218,7 @@ def load_model(model_name='gpt2', device=None, dtype=None):
             n_head=8, n_inner=2048, activation_function='gelu',
             resid_pdrop=0.0, embd_pdrop=0.0, attn_pdrop=0.0,
         )
+        from transformers import GPT2LMHeadModel
         model = GPT2LMHeadModel(config)
         model.load_state_dict(sd, strict=False)
         model.to(device)
@@ -269,6 +276,7 @@ def load_model(model_name='gpt2', device=None, dtype=None):
         model_type = 'circuitgpt'
         d_model = model.config.d_model
     elif is_gpt2:
+        from transformers import GPT2LMHeadModel, GPT2Tokenizer
         model = GPT2LMHeadModel.from_pretrained(hf_name).to(device)
         tokenizer = GPT2Tokenizer.from_pretrained(hf_name)
         model_type = 'gpt2'

@@ -1,0 +1,109 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{microtype}
+\usepackage{parskip}
+
+\title{Can the $n=2$ response function correct interference?}
+\author{}
+\date{}
+
+\newcommand{\tr}{\operatorname{tr}}
+\newcommand{\RR}{\mathbb{R}}
+\newcommand{\EE}{\mathbb{E}}
+
+\begin{document}
+\maketitle
+
+\section{Setup and question}
+
+A model has response $R(v) = F(S(v))$ with
+\[
+  S(v) = \sum_{i=1}^M w_i (d_i^\top v)^2 = v^\top A v,
+  \qquad A = \sum_i w_i d_i d_i^\top,
+\]
+unit feature directions $\{d_i\}$ in $\RR^D$ with $M > D$, weights
+$w_i \ge 0$, and plateau $\{v : S(v) < c\}$. The plateau-breaking
+magnitude along unit $d$ is $m_d = \sqrt{c / (d^\top A d)}$. Write
+$q_i := d_i^\top A d_i$.
+
+With $k$ active features, an inactive feature $i$ picks up spurious
+read-off of typical size $\sigma_a\sqrt{k/D}$. We demand:
+
+\begin{itemize}
+  \item \textbf{Per-feature correction:}
+    $\sigma_a\sqrt{k/D} \le m_{d_i} \le \sigma_a$ for every $i$ ---
+    i.e.\ $c/\sigma_a^2 \le q_i \le Dc/(k\sigma_a^2)$.
+  \item \textbf{LRH sensitivity:} $m_{d_i} < m_{d_r}$ for every
+    feature $i$ (random unit $d_r$) --- i.e.\ $q_i > \tr(A)/D$.
+\end{itemize}
+
+\textbf{Question.} Do weights $\{w_i\}$ and $c > 0$ exist making both
+conditions hold simultaneously?
+
+\section{Answer (i): under tight framing, no}
+
+If the feature frame is tight ($\Phi\Phi^\top = (M/D)\,I$), the answer
+is \textbf{no, for any weight choice}.
+
+Summing LRH over features:
+\[
+  \sum_i q_i = \tr(A\,\Phi\Phi^\top) = \frac{M}{D}\,\tr A.
+\]
+So the average of $q_i$ over features equals $\tr(A)/D$ exactly --- at
+least one feature must violate strict LRH, regardless of
+$\{w_i\}$. No reweighting rescues a tight frame.
+
+\paragraph{Why tight framing is the usual assumption.}
+Tight frames minimise worst-case coherence $\max_{i\ne j}|G_{ij}|$
+(Welch bound), equalise the spurious read-offs $\hat a_i$ across
+features, and make $\Phi\Phi^\top$ isotropic so that random directions
+in activation space are all treated the same. These are exactly the
+conditions under which the typical-interference estimate
+$\sigma_a\sqrt{k/D}$ is valid. Tightness is therefore the natural
+idealisation whenever one wants interference to be uniformly small
+across features --- and the $n=2$ response function cannot
+simultaneously satisfy interference correction and LRH sensitivity in
+this idealisation.
+
+\section{Answer (ii): lifting tight framing, yes}
+
+If the frame is not tight, the answer is \textbf{yes}. The simplest
+construction: take directions with $G_{ij}^2 \approx 1/D$ for $i \ne
+j$ (i.e.\ the regime in which the $\sigma_a\sqrt{k/D}$ estimate is
+accurate, but without enforcing $\Phi\Phi^\top = (M/D)I$). With
+uniform weights $w_i = 1$,
+\[
+  q_i = 1 + \sum_{j\ne i} G_{ij}^2 \;\approx\; \frac{M}{D} + \frac{D-1}{D}.
+\]
+Then $q_i - \tr(A)/D \approx (D-1)/D$: a margin of order $1$ per
+feature, so LRH holds for every $i$. Choose $c = \sigma_a^2 \min_i
+q_i$: the feature with smallest $q_i$ hits $m = \sigma_a$; all others
+satisfy $q_i \in [q_{\min},\, q_{\max}]$ with $q_{\max}/q_{\min} = 1 +
+O(\sqrt{M}/D)$, easily inside the factor-$D/k$ bracket for $k \ll D$.
+
+\paragraph{What this costs.}
+Dropping tight framing buys feasibility but introduces a parasitic
+privileged direction. The top eigenvector $u$ of $\Phi\Phi^\top$ has
+$q_u = \lambda_{\max}(A) > q_i$ for every feature, so $u$ --- which is
+\emph{not} a feature direction --- is steeper than any feature. LRH
+then holds only in the typical sense (features beat typical random
+directions), not universally (features do not beat the worst-case
+random direction). Non-uniform interference also appears: feature
+pairs with $G_{ij}^2$ above average exceed the Welch bound, and the
+$\sigma_a\sqrt{k/D}$ estimate becomes an approximation rather than a
+uniform bound.
+
+\section{Summary}
+
+\begin{itemize}
+  \item Tight frame $\Rightarrow$ LRH and per-feature correction
+    cannot coexist, for any weights.
+  \item Non-tight frame with $G_{ij}^2 \approx 1/D$ uniformly
+    $\Rightarrow$ both conditions hold with uniform weights.
+  \item The cost of dropping tightness is a non-feature direction
+    (the top eigenvector of $\Phi\Phi^\top$) that is strictly steeper
+    than any feature.
+\end{itemize}
+
+\end{document}

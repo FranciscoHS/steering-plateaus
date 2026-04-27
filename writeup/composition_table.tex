@@ -1,0 +1,45 @@
+% Compositional steering table: Portuguese x Gender at Gemma-2-9B layer 2.
+% Generated from results/paper_L2_gemma2_9b/generations_composition_L2.json (sample 0).
+% Depends on \usepackage{xcolor}, \usepackage{booktabs} in the preamble.
+
+\definecolor{ptblue}{HTML}{2166AC}
+\definecolor{femred}{HTML}{C51B7D}
+\definecolor{ptfem}{HTML}{7B3294}
+
+\newcommand{\pt}[1]{\textcolor{ptblue}{#1}}
+\newcommand{\fm}[1]{\textcolor{femred}{#1}}
+\newcommand{\ptfm}[1]{\textcolor{ptfem}{#1}}
+
+\begin{table*}[t]
+\centering
+\small
+\caption{Compositional steering at layer~2 of Gemma-2-9B. Starting prompt:
+  ``They elected a new chairman''. Steering directions: EN$\to$PT (Portuguese)
+  and Male$\to$Female (Gender), both applied via spherical rotation on the
+  last-token residual at every generation step. $\cos(d_{\mathrm{PT}}, d_{\mathrm{Gender}}) = 0.043$.
+  Colour: \pt{Portuguese}, \fm{feminine-gendered English}, \ptfm{feminine-gendered Portuguese}.}
+\label{tab:composition}
+\begin{tabular}{@{}lp{0.80\textwidth}@{}}
+\toprule
+\textbf{Condition} & \textbf{Completion} \\
+\midrule
+\emph{Baseline} & last year and have now appointed a new general manager.\par
+``The committee has decided to restructure the club to ensure that it is well placed to be able to compete at the highest level in the future,'' club chairman Mark Harris said.\par
+``The committee is confident that with the appointment of Michael, it will lead to the club playing at a very high standard.''\par
+Harris said he was confident the \\
+\addlinespace[3pt]
+\emph{+PT $(20^\circ)$} & of the board of directors on Wednesday. He will succeed the outgoing president, who \pt{termina seu mandado este ano}.\par
+\pt{O encontro da Comiss\~ao Permanente da Organiza\c{c}\~ao da Unidade Africana (AOU) reuniu em Bangui, Rep\'ublica Centro-Africana, de 25 a 27 de Janeiro de 2023, para discutir o tema da seguran\c{c}a e desenvolvimento para} \\
+\addlinespace[3pt]
+\emph{+Female $(20^\circ)$} & , who pledged to increase the amount of power devolved to local councillors.\par
+Councillor \fm{Sue} Baxter is the first \fm{woman} in 14 years to head the Conservative administration in North Yorkshire.\par
+\fm{She} was the first \fm{female} to chair the authority's policy and resources committee and has held many executive and executive portfolio committee positions.\par
+``I feel very honoured to have been elected chairman of the council,'' \fm{she} said \\
+\addlinespace[3pt]
+\emph{+PT~+Female $(20^\circ$ each$)$} & and four vice-chairmen.\par
+The election for the chairman was between incumbent \fm{chairwoman}, \ptfm{Maria Helena Braga}, \pt{de 88 anos e a} \ptfm{doutra em medicina}, \ptfm{Maria de F\'atima}, \pt{de 53 anos}.\par
+\pt{No primeira vota\c{c}\~ao, obteve 142 votos e a} \ptfm{doutra} \pt{137.}\par
+\pt{No segunda vota\c{c}\~ao,} \ptfm{Maria Braga} \pt{obteve 13} \\
+\bottomrule
+\end{tabular}
+\end{table*}

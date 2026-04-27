@@ -1,0 +1,22 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{microtype}
+
+\title{What our results say about error correction}
+\date{}
+
+\begin{document}
+\maketitle
+
+The functional form we fit,
+\[
+R(v) \;=\; F\!\left(\sum_i w_i\, |d_i^\top v|^n\right),
+\]
+parameterises a family of aggregation rules indexed by $n$. Two limits are interpretable in error-correction terms. At $n \to \infty$ the inner sum reduces to a max: $R(v) = F(\max_i w_i^{1/n} |d_i^\top v|)$ (up to rescaling of $F$), so the response is triggered by whichever single projection first exceeds its threshold. This is the signature of \emph{per-feature threshold} error correction: each candidate direction $d_i$ has its own tolerance, and the model tolerates perturbations until one crosses that tolerance. Geometrically, the predicted iso-plateau is a (possibly stretched) square in the $d_i$ basis. At $n = 2$ the inner sum is the quadratic form $\sum_i w_i (d_i^\top v)^2$, so the response depends on a single scalar aggregate of projections across all directions, with no per-direction threshold. The predicted iso-plateau is a (possibly stretched) circle.
+
+Empirically we find $n \approx 2$, with per-pair fit residuals of order 1\% across pairs, models, layers, and response metrics; iso-plateaus are approximately circular after normalisation, not square. This distinguishes the two limits at the level of the measured shape. The observation is inconsistent with per-feature threshold error correction: if each candidate direction carried its own independent tolerance, the iso-plateau would approach a square as the tolerances became sharper, not a circle. Our results therefore argue against the hypothesis that the residual stream is protected by tolerances attached to individual feature directions.
+
+We emphasise what is \emph{not} settled by this observation. The $n = 2$ form is itself consistent with error-correcting schemes that threshold on an aggregate quantity (for example, a single global threshold on $\sum_i w_i (d_i^\top v)^2$). Distinguishing such aggregate schemes from a model that simply has a smooth quadratic sensitivity and no error correction of any kind requires inputs beyond the iso-plateau shape. What we have shown is specifically that individual feature directions do not carry individual thresholds.
+
+\end{document}
