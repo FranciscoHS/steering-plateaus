@@ -26,45 +26,11 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from src.model import load_model, _get_blocks
+from src.autoencoders import Autoencoder
 PROMPT_SETS = {
     'language': 'data.bilingual_prompts_hq',
     'gender': 'data.gender_prompts',
 }
-
-
-# ── Autoencoder (same as on_manifold_steering.py) ────────────────────────
-
-class Autoencoder(nn.Module):
-    def __init__(self, d_in, k, hidden_dims=None):
-        super().__init__()
-        self.d_in = d_in
-        self.k = k
-        if hidden_dims is None:
-            hidden_dims = [4096, 4096, 2048]
-        enc = []
-        prev = d_in
-        for h in hidden_dims:
-            enc.extend([nn.Linear(prev, h), nn.BatchNorm1d(h), nn.GELU()])
-            prev = h
-        enc.append(nn.Linear(prev, k))
-        self.encoder = nn.Sequential(*enc)
-        dec = []
-        prev = k
-        for h in reversed(hidden_dims):
-            dec.extend([nn.Linear(prev, h), nn.BatchNorm1d(h), nn.GELU()])
-            prev = h
-        dec.append(nn.Linear(prev, d_in))
-        self.decoder = nn.Sequential(*dec)
-
-    def encode(self, x):
-        return self.encoder(x)
-
-    def decode(self, z):
-        return self.decoder(z)
-
-    def forward(self, x):
-        z = self.encode(x)
-        return self.decode(z), z
 
 
 # ── Activation extraction ────────────────────────────────────────────────

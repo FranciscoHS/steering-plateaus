@@ -20,35 +20,7 @@ import torch.nn.functional as F
 
 from src.model import load_model, _get_blocks
 from src.data import load_fineweb_fixed_length
-
-
-# ── Autoencoder (must match on_manifold_steering.py) ─────────────────────
-
-class Autoencoder(nn.Module):
-    def __init__(self, d_in, k, hidden_dims=None):
-        super().__init__()
-        self.d_in = d_in
-        self.k = k
-        if hidden_dims is None:
-            hidden_dims = [4096, 4096, 2048]
-        enc = []
-        prev = d_in
-        for h in hidden_dims:
-            enc.extend([nn.Linear(prev, h), nn.BatchNorm1d(h), nn.GELU()])
-            prev = h
-        enc.append(nn.Linear(prev, k))
-        self.encoder = nn.Sequential(*enc)
-        dec = []
-        prev = k
-        for h in reversed(hidden_dims):
-            dec.extend([nn.Linear(prev, h), nn.BatchNorm1d(h), nn.GELU()])
-            prev = h
-        dec.append(nn.Linear(prev, d_in))
-        self.decoder = nn.Sequential(*dec)
-
-    def forward(self, x):
-        z = self.encoder(x)
-        return self.decoder(z), z
+from src.autoencoders import Autoencoder
 
 
 # ── CE evaluation ────────────────────────────────────────────────────────

@@ -15,6 +15,9 @@ build/
 # Results (sync separately, can get large)
 results/
 
+# Obsidian hub note symlink (lives in vault)
+notes/
+
 # Environment
 .env
 venv/

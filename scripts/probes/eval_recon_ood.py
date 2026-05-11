@@ -21,7 +21,7 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from scripts.jacobian.intrinsic_dim_data_sources import SOURCE_LOADERS
+from src.data_sources import SOURCE_LOADERS
 from scripts.probes.run_probe_sae_vs_ae import load_sae, load_ae
 
 
@@ -60,8 +60,9 @@ def run_source(name, model, tokenizer, sae, ae, device, n_pool, seq_len, layer,
         logits_base = out.logits[:, -1, :].float()  # [B, V]
 
         # ── Reconstruct
-        recon_sae = sae(raw.to(next(sae.parameters()).dtype)).float()
-        recon_ae = ae(raw.to(next(ae.parameters()).dtype)).float()
+        # TopKSAE and FlexAutoencoder both return tuples; take recon (first element).
+        recon_sae = sae(raw.to(next(sae.parameters()).dtype))[0].float()
+        recon_ae = ae(raw.to(next(ae.parameters()).dtype))[0].float()
 
         # ── Swap-in forward (SAE)
         def make_hook(recon_cast):

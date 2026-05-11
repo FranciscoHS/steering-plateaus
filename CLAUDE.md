@@ -15,6 +15,8 @@ I am Francisco, a researcher with a PhD in Quantum Info who is now working on me
 
 **Answering questions:** When Francisco asks a question, answer it directly. Don't preemptively retract or redirect — just answer. If there's a correction to make, make it after answering, not instead of answering.
 
+**Project hub note:** Read `notes/_project.md` at session start — it's a symlink to Francisco's Obsidian hub note for this project (`AI Safety/Manifold Learning.md` in his vault). It contains the current question, recent results, next steps, and open threads. Use it as living context for what we're working on. The `notes/` directory is gitignored and only exists on Francisco's machine.
+
 ## Remote Experiments
 When running experiments on RunPod or remote GPU pods, ALWAYS save results to files (not just stdout). Check disk space before downloading models. Never claim a file exists or was downloaded without verifying with `ls` or `cat`.
 

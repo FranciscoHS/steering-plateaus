@@ -28,90 +28,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score
 
 from src.model import load_model
-
-
-# ── TopK SAE ────────────────────────────────────────────────────────────
-
-class TopKSAE(nn.Module):
-    def __init__(self, d_in, d_sae, k):
-        super().__init__()
-        self.d_in = d_in
-        self.d_sae = d_sae
-        self.k = k
-        self.encoder = nn.Linear(d_in, d_sae)
-        self.W_dec = nn.Parameter(torch.empty(d_sae, d_in))
-        self.b_dec = nn.Parameter(torch.zeros(d_in))
-        nn.init.kaiming_uniform_(self.encoder.weight)
-        nn.init.zeros_(self.encoder.bias)
-        nn.init.kaiming_uniform_(self.W_dec)
-        with torch.no_grad():
-            self.W_dec.data = F.normalize(self.W_dec.data, dim=-1)
-
-    def forward(self, x):
-        x_centered = x - self.b_dec
-        pre_acts = F.relu(self.encoder(x_centered))
-        top_vals, top_idx = pre_acts.topk(self.k, dim=-1)
-        W_selected = self.W_dec[top_idx]
-        recon = (top_vals.unsqueeze(-1) * W_selected).sum(dim=1) + self.b_dec
-        return recon
-
-
-# ── FlexAutoencoder ─────────────────────────────────────────────────────
-
-class Block(nn.Module):
-    def __init__(self, d_in, d_out, activation='relu', norm='none', residual=False):
-        super().__init__()
-        self.residual = residual and (d_in == d_out)
-        ACTIVATIONS = {'relu': nn.ReLU, 'gelu': nn.GELU, 'silu': nn.SiLU}
-        self.linear = nn.Linear(d_in, d_out)
-        self.act = ACTIVATIONS[activation]()
-        if norm == 'batchnorm':
-            self.norm = nn.BatchNorm1d(d_out)
-        elif norm == 'layernorm':
-            self.norm = nn.LayerNorm(d_out)
-        else:
-            self.norm = nn.Identity()
-
-    def forward(self, x):
-        out = self.act(self.linear(x))
-        out = self.norm(out)
-        if self.residual:
-            out = out + x
-        return out
-
-
-class FlexAutoencoder(nn.Module):
-    def __init__(self, d_in, k, hidden_dims, activation='relu',
-                 norm='none', residual=False, **kwargs):
-        super().__init__()
-        self.d_in = d_in
-        self.k = k
-        enc_dims = kwargs.get('encoder_dims') or hidden_dims
-        dec_dims = kwargs.get('decoder_dims') or list(reversed(hidden_dims))
-
-        encoder_blocks = []
-        prev = d_in
-        for h in enc_dims:
-            encoder_blocks.append(Block(prev, h, activation, norm, residual))
-            prev = h
-        self.encoder_blocks = nn.ModuleList(encoder_blocks)
-        self.encoder_out = nn.Linear(prev, k)
-
-        decoder_blocks = []
-        prev = k
-        for h in dec_dims:
-            decoder_blocks.append(Block(prev, h, activation, norm, residual))
-            prev = h
-        self.decoder_blocks = nn.ModuleList(decoder_blocks)
-        self.decoder_out = nn.Linear(prev, d_in)
-
-    def forward(self, x):
-        for block in self.encoder_blocks:
-            x = block(x)
-        z = self.encoder_out(x)
-        for block in self.decoder_blocks:
-            z = block(z)
-        return self.decoder_out(z)
+from src.autoencoders import TopKSAE, FlexAutoencoder, load_sae, load_ae
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────
@@ -137,41 +54,14 @@ def get_activations(model, tokenizer, texts, layer, device, batch_size=32):
     return torch.cat(all_acts, dim=0)
 
 
-def load_sae(path, device):
-    checkpoint = torch.load(path, map_location='cpu', weights_only=True)
-    config = checkpoint['config']
-    sae = TopKSAE(config['d_in'], config['d_sae'], config['k'])
-    sae.load_state_dict(checkpoint['state_dict'])
-    sae.eval()
-    print(f"  SAE: d_in={config['d_in']}, d_sae={config['d_sae']}, k={config['k']}")
-    return sae.to(device)
-
-
-def load_ae(path, device):
-    checkpoint = torch.load(path, map_location='cpu', weights_only=True)
-    config = checkpoint['config']
-    ae = FlexAutoencoder(
-        d_in=config['d_in'], k=config['k'],
-        hidden_dims=config.get('hidden_dims', [4096, 4096, 2048]),
-        activation=config.get('activation', 'gelu'),
-        norm=config.get('norm', 'batchnorm'),
-        residual=config.get('residual', False),
-        encoder_dims=config.get('encoder_dims'),
-        decoder_dims=config.get('decoder_dims'),
-    )
-    ae.load_state_dict(checkpoint['state_dict'])
-    ae.eval()
-    print(f"  AE: d_in={config['d_in']}, k={config['k']}, "
-          f"hidden={config.get('hidden_dims')}, act={config.get('activation')}")
-    return ae.to(device)
-
-
 def reconstruct(model, activations, device, batch_size=512):
+    """Reconstruct activations through an SAE or AE. Both return tuples."""
     all_recon = []
     for i in range(0, len(activations), batch_size):
         batch = activations[i:i+batch_size].to(device)
         with torch.no_grad():
-            recon = model(batch)
+            out = model(batch)
+            recon = out[0] if isinstance(out, tuple) else out
         all_recon.append(recon.cpu().float())
     return torch.cat(all_recon, dim=0)
 

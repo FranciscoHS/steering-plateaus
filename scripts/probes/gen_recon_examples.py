@@ -22,7 +22,7 @@ sys.path.insert(0, '.')
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from scripts.jacobian.intrinsic_dim_data_sources import SOURCE_LOADERS
+from src.data_sources import SOURCE_LOADERS
 from scripts.probes.run_probe_sae_vs_ae import load_sae, load_ae
 
 
@@ -99,10 +99,12 @@ def main():
     ae = load_ae(args.ae_weights, device).eval()
 
     def sae_fn(x):
-        return sae(x.to(next(sae.parameters()).dtype)).float()
+        # TopKSAE.forward returns (recon, top_vals, top_idx); take recon.
+        return sae(x.to(next(sae.parameters()).dtype))[0].float()
 
     def ae_fn(x):
-        return ae(x.to(next(ae.parameters()).dtype)).float()
+        # FlexAutoencoder.forward returns (recon, z); take recon.
+        return ae(x.to(next(ae.parameters()).dtype))[0].float()
 
     min_chars = args.seq_len * 10
     print(f"Loading {args.n_examples + 3} {args.source} texts...")

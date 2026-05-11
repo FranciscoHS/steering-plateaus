@@ -32,7 +32,7 @@ import torch
 import numpy as np
 
 from src.model import load_model, forward_from_layer_to_layer, _get_blocks
-from scripts.jacobian.case_study_decomp import (
+from scripts.dictionary_learning.case_study_decomp import (
     spherical_perturb_batch, decompose_one_direction
 )
 

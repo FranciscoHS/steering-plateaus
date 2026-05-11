@@ -29,27 +29,7 @@ from src.model import (
     _get_final_norm, _get_lm_head, _get_blocks,
 )
 from src.data import load_fineweb_fixed_length, sample_random_activations_v2
-
-
-class TopKSAE(torch.nn.Module):
-    """Minimal TopK SAE for loading weights and running encode/decode."""
-
-    def __init__(self, d_in, d_sae, k):
-        super().__init__()
-        self.d_in = d_in
-        self.d_sae = d_sae
-        self.k = k
-        self.encoder = torch.nn.Linear(d_in, d_sae)
-        self.W_dec = torch.nn.Parameter(torch.empty(d_sae, d_in))
-        self.b_dec = torch.nn.Parameter(torch.zeros(d_in))
-
-    def forward(self, x):
-        x_centered = x - self.b_dec
-        pre_acts = F.relu(self.encoder(x_centered))
-        top_vals, top_idx = pre_acts.topk(self.k, dim=-1)
-        W_selected = self.W_dec[top_idx]
-        recon = (top_vals.unsqueeze(-1) * W_selected).sum(dim=1) + self.b_dec
-        return recon
+from src.autoencoders import TopKSAE
 
 
 def extract_context_and_activation(model, tokenizer, token_ids_list, layer, device, batch_size=64):
@@ -183,7 +163,7 @@ def main():
     # SAE reconstructions
     print("Computing SAE reconstructions...")
     with torch.no_grad():
-        sae_recon = sae(activations.to(device)).cpu()
+        sae_recon = sae(activations.to(device))[0].cpu()
     recon_error = (activations - sae_recon).norm(dim=-1)
     recon_cos = F.cosine_similarity(activations, sae_recon, dim=-1)
     print(f"SAE recon: L2 error mean={recon_error.mean():.2f}, cos_sim mean={recon_cos.mean():.4f}")

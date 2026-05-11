@@ -11,9 +11,65 @@ Quick reference: "I want to do X — which script do I run?"
 
 ## Jacobian analysis
 - **Compute Jacobian eigenspectrum:** `jacobian/run_jacobian_v2.py`
-- **Optimize delta directions:** `jacobian/run_delta_optimization_v2.py`
 - **Analyze optimized deltas:** `jacobian/analyze_delta.py`
 - **Neuron gate switch analysis:** `jacobian/run_gate_switches.py`
+- **Subspace overlap analysis:** `jacobian/subspace_overlap_analysis.py`
+- **Compare spectra:** `jacobian/compare_spectra.py`
+- **Compute activation PCs:** `jacobian/compute_activation_pcs.py`
+- **KL-based direction selection:** `jacobian/kl_selection.py`
+- **Min-Jacobian reconstruction:** `jacobian/reconstruct_min_jacobian.py`
+- **Reproducibility (SVD):** `jacobian/reproducibility_svd.py`, `reproducibility_svd_kl.py`, `reproducibility_svd_recon.py`
+
+## Delta optimization
+Scripts that optimize delta directions in activation space (jacobian-flavored,
+but spun out into their own dir because there are many versions).
+- **Latest delta opt:** `delta_optimization/run_delta_optimization_v9.py` (v2..v9 available)
+- **Per-activation optimization:** `delta_optimization/per_activation_opt_v9.py`
+- **Joint vs per-activation sweep:** `delta_optimization/sweep_per_act_vs_joint.py`
+- **Response analysis:** `delta_optimization/response_decomp.py`, `delta_optimization/response_sweep.py`
+- **Delta vs random perturbation:** `delta_optimization/perturbation_response_delta_vs_random.py`
+- **Entropy / shifted-activation analysis:** `delta_optimization/entropy_histogram_shifted.py`, `delta_optimization/generate_from_shifted.py`
+- **Steer with optimized delta:** `delta_optimization/steer_delta_spherical.py`, `delta_optimization/steer_with_opt_delta.py`, `delta_optimization/steer_v{7,9}_direction.py`
+- **Steer with response directions:** `delta_optimization/steer_response_dirs.py`, `delta_optimization/steer_shared_direction.py`
+- **Direction sweeps:** `delta_optimization/sweep_v{6,7}_direction.py`
+- **Token-boost v9:** `delta_optimization/token_boost_v9.py`
+
+## Autoencoder training & analysis
+Vanilla (non-sparse) autoencoder training and reconstruction-quality analysis.
+- **Train AE:** `autoencoder/train_autoencoder.py` (older DeepAutoencoder) or `autoencoder/hillclimb_autoencoder.py` (FlexAutoencoder hillclimb sweep)
+- **Cache subsets:** `autoencoder/create_subsets.py`
+- **Bottleneck sweep:** `autoencoder/sweep_autoencoder_bottleneck.py`
+- **CE-loss eval:** `autoencoder/eval_ce_loss.py`
+- **Quick overfit check:** `autoencoder/quick_overfit_check.py`
+- **Pipelines:** `autoencoder/run_full_pipeline.sh`, `run_recovery_pipeline.sh`, `run_final_eval.sh`
+- **Plots:** `autoencoder/plot_training_curves.py`, `plot_final_comparison.py`, `plot_bottleneck_combined.py`, `plot_ae_vs_sae_scaling.py`
+
+## Dictionary learning (SAE + pruned dicts)
+SAE training and pruned-dictionary work (MP/FP).
+- **Train TopK SAE:** `dictionary_learning/train_sae.py`
+- **Prune dictionary (MP):** `dictionary_learning/prune_dictionary.py`
+- **Prune dictionary (FP):** `dictionary_learning/prune_dictionary_fp.py`
+- **Benchmark dictionary:** `dictionary_learning/benchmark_dictionary.py`
+- **Connected components:** `dictionary_learning/dictionary_connected_components.py`
+- **Feature decomposition:** `dictionary_learning/feature_decomp.py`, `batch_decomp.py`, `case_study_decomp.py`, `case_study_extra.py`, `run_full_decomp_pipeline.py`
+- **Compare real vs GLP:** `dictionary_learning/compare_real_vs_glp.py`
+- **Pareto recon vs plateau:** `dictionary_learning/pareto_plateau_vs_recon.py` (KL) or `pareto_plateau_vs_recon_l2.py` (L2)
+- **Perturbation sweeps:** `dictionary_learning/perturbation_sweep_dict_comparison.py`, `perturbation_sweep_reconstructions.py`
+- **Sweep directions comparison:** `dictionary_learning/sweep_directions_comparison.py`
+- **Plots:** `dictionary_learning/plot_fp_vs_mp_benchmark.py`, `plot_residual_curve.py`, `plot_sweep_cosine.py`
+
+## Intrinsic dimensionality estimation
+TwoNN-based intrinsic dim, clustered ID, and jacobian-matched ID.
+- **TwoNN baseline:** `intrinsic_dim/intrinsic_dim_twonn.py`
+- **Layer sweep:** `intrinsic_dim/intrinsic_dim_layer_sweep.py`
+- **Gaussian baseline:** `intrinsic_dim/intrinsic_dim_gaussian_baseline.py`
+- **Robustness:** `intrinsic_dim/intrinsic_dim_robustness.py`
+- **Across data sources:** `intrinsic_dim/intrinsic_dim_data_sources.py`
+- **Jacobian-matched ID:** `intrinsic_dim/intrinsic_dim_jac_filtered.py`, `intrinsic_dim_jac_matched.py`, `intrinsic_dim_jac_optimized.py`
+- **TwoNN vs n:** `intrinsic_dim/twonn_vs_n.py`, `twonn_vs_n_traincache.py`, `twonn_append.py`, `twonn_append_100k.py`
+- **Cluster ID:** `intrinsic_dim/cluster_intrinsic_dim.py`, `cluster_intrinsic_dim_sweep.py`, `cluster_id_n2000.py`
+- **Collect layer activations:** `intrinsic_dim/collect_layer10_activations.py`
+- **Plot ID vs cluster size:** `intrinsic_dim/plot_id_vs_cluster_size_l10.py`
 
 ## Anisotropy measurements
 - **2D KL heatmap (single pair):** `anisotropy/run_anisotropy_heatmap.py` (KL) or `anisotropy/run_anisotropy_heatmap_l2.py` (L2)

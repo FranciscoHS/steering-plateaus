@@ -38,53 +38,8 @@ import matplotlib.pyplot as plt
 
 from src.model import load_model, _get_blocks
 from src.data import load_fineweb_fixed_length
+from src.autoencoders import Autoencoder
 from data.bilingual_prompts_hq import PROMPT_PAIRS
-
-
-# ── Autoencoder ──────────────────────────────────────────────────────────
-
-class Autoencoder(nn.Module):
-    """MLP autoencoder with GELU + BatchNorm (best config from hillclimb).
-
-    Architecture:
-        Encoder: d_in → h1 → h2 → h3 → k
-        Decoder: k → h3 → h2 → h1 → d_in
-    """
-
-    def __init__(self, d_in, k, hidden_dims=None):
-        super().__init__()
-        self.d_in = d_in
-        self.k = k
-        if hidden_dims is None:
-            hidden_dims = [4096, 4096, 2048]
-
-        # Encoder
-        enc = []
-        prev = d_in
-        for h in hidden_dims:
-            enc.extend([nn.Linear(prev, h), nn.BatchNorm1d(h), nn.GELU()])
-            prev = h
-        enc.append(nn.Linear(prev, k))
-        self.encoder = nn.Sequential(*enc)
-
-        # Decoder (mirror)
-        dec = []
-        prev = k
-        for h in reversed(hidden_dims):
-            dec.extend([nn.Linear(prev, h), nn.BatchNorm1d(h), nn.GELU()])
-            prev = h
-        dec.append(nn.Linear(prev, d_in))
-        self.decoder = nn.Sequential(*dec)
-
-    def encode(self, x):
-        return self.encoder(x)
-
-    def decode(self, z):
-        return self.decoder(z)
-
-    def forward(self, x):
-        z = self.encode(x)
-        return self.decode(z), z
 
 
 # ── Contrastive direction ────────────────────────────────────────────────
