@@ -117,8 +117,18 @@ def threshold_levels(l2_grid_mean: np.ndarray) -> dict:
 
 
 def fit_p_one_pass(angles_deg: np.ndarray, l2_grid_mean: np.ndarray,
-                    threshold: float, max_alpha_deg: float) -> dict:
-    """One (threshold, range) fit on the mean grid."""
+                    threshold: float, max_alpha_deg: float,
+                    exact_geodesic: bool = False) -> dict:
+    """One (threshold, range) fit on the mean grid.
+
+    If exact_geodesic is False (default), normalize contour points by
+    (alpha_1/t1, alpha_2/t2) — the sin alpha ~ alpha small-angle form.
+    If True, use the exact geodesic form derived from
+        sin^n(alpha(phi)) [w_1 cos^n phi + w_2 sin^n phi] = const,
+    i.e. (sin alpha cos phi / sin alpha_1, sin alpha sin phi / sin alpha_2)
+    where alpha_1, alpha_2 are the 1D plateau-breaking angles. The fit
+    routine itself is unchanged; only the normalization differs.
+    """
     raw = extract_contour(angles_deg, l2_grid_mean, threshold)
     if raw.size == 0:
         return {"p": np.nan, "n_pts": 0, "mean_radial_frac": np.nan,
@@ -142,17 +152,85 @@ def fit_p_one_pass(angles_deg: np.ndarray, l2_grid_mean: np.ndarray,
         return {"p": np.nan, "n_pts": int(len(raw)),
                 "mean_radial_frac": np.nan, "max_radial_frac": np.nan,
                 "intercepts": (t1, t2)}
-    xn = raw[:, 0] / t1
-    yn = raw[:, 1] / t2
+    if exact_geodesic:
+        # raw[:, 0] = alpha(phi) cos phi, raw[:, 1] = alpha(phi) sin phi
+        # (in degrees). Use sin alpha exactly; small-r safe div via clamp.
+        r_deg = np.hypot(raw[:, 0], raw[:, 1])
+        r_safe = np.where(r_deg > 1e-12, r_deg, 1.0)
+        r_rad = np.deg2rad(r_deg)
+        t1_rad = np.deg2rad(t1)
+        t2_rad = np.deg2rad(t2)
+        xn = (np.sin(r_rad) / np.sin(t1_rad)) * (raw[:, 0] / r_safe)
+        yn = (np.sin(r_rad) / np.sin(t2_rad)) * (raw[:, 1] / r_safe)
+    else:
+        xn = raw[:, 0] / t1
+        yn = raw[:, 1] / t2
     fit = fit_superellipse(xn, yn)
     fit["intercepts"] = (t1, t2)
     return fit
 
 
+def robust_p_fit_fixed_l2(angles_deg: np.ndarray,
+                           l2_grid_per_anchor: np.ndarray,
+                           thresh_l2: float,
+                           threshold_factors: tuple = (0.5, 1.0, 2.0),
+                           max_alphas: tuple = (30.0, 45.0, 60.0),
+                           n_bootstrap: int = 0,
+                           seed: int = 42,
+                           exact_geodesic: bool = False) -> dict:
+    """Fixed-L^2 robustness protocol.
+
+    Like robust_p_fit but uses thresh = factor * thresh_l2 for each
+    factor in threshold_factors (rather than {50%, 75%} of axis max).
+    Output structure is identical so downstream code (median_p_for_pair,
+    plot_robustness_beeswarm) doesn't need changes.
+    """
+    rng = np.random.RandomState(seed)
+    n_a = l2_grid_per_anchor.shape[0]
+    mean_grid = np.median(l2_grid_per_anchor, axis=0)
+    levels = {f"{f}xT": float(f * thresh_l2) for f in threshold_factors}
+    out = {}
+    for f in threshold_factors:
+        thresh = float(f * thresh_l2)
+        tl = f"{f}xT"
+        for ma in max_alphas:
+            base = fit_p_one_pass(angles_deg, mean_grid, thresh, ma,
+                                   exact_geodesic=exact_geodesic)
+            if n_bootstrap == 0:
+                p = base["p"] if np.isfinite(base["p"]) else np.nan
+                ps = np.array([p]) if np.isfinite(p) else np.array([])
+            else:
+                ps = []
+                for _ in range(n_bootstrap):
+                    idx = rng.randint(0, n_a, size=n_a)
+                    grid_b = np.median(l2_grid_per_anchor[idx], axis=0)
+                    fb = fit_p_one_pass(angles_deg, grid_b, thresh, ma,
+                                         exact_geodesic=exact_geodesic)
+                    if np.isfinite(fb["p"]):
+                        ps.append(fb["p"])
+                ps = np.array(ps)
+            out[(tl, ma)] = {
+                "p_point": base["p"],
+                "p_median": float(np.median(ps)) if len(ps) else np.nan,
+                "p_lo": float(np.percentile(ps, 5)) if len(ps) else np.nan,
+                "p_hi": float(np.percentile(ps, 95)) if len(ps) else np.nan,
+                "n_bootstrap_ok": int(len(ps)),
+                "n_pts": base["n_pts"],
+                "mean_radial_frac": base["mean_radial_frac"],
+                "intercepts": base["intercepts"],
+                "threshold": float(thresh),
+                "threshold_label": tl,
+                "max_alpha_deg": float(ma),
+            }
+    out["__levels__"] = levels
+    return out
+
+
 def robust_p_fit(angles_deg: np.ndarray, l2_grid_per_anchor: np.ndarray,
                   thresholds: tuple = ("50", "75"),
                   max_alphas: tuple = (30.0, 45.0, 60.0),
-                  n_bootstrap: int = 200, seed: int = 42) -> dict:
+                  n_bootstrap: int = 200, seed: int = 42,
+                  exact_geodesic: bool = False) -> dict:
     """Full robustness protocol.
 
     l2_grid_per_anchor has shape (n_anchors, n, n). Mean is taken across
@@ -165,21 +243,32 @@ def robust_p_fit(angles_deg: np.ndarray, l2_grid_per_anchor: np.ndarray,
     """
     rng = np.random.RandomState(seed)
     n_a = l2_grid_per_anchor.shape[0]
-    mean_grid = l2_grid_per_anchor.mean(axis=0)
+    # Median over anchors (more robust to anchor heterogeneity than mean;
+    # matches the older fig4 pipeline. See discussion in CLAUDE notes.)
+    mean_grid = np.median(l2_grid_per_anchor, axis=0)
     levels = threshold_levels(mean_grid)
     out = {}
     for tl in thresholds:
         thresh = levels[tl]
         for ma in max_alphas:
-            base = fit_p_one_pass(angles_deg, mean_grid, thresh, ma)
-            ps = []
-            for _ in range(n_bootstrap):
-                idx = rng.randint(0, n_a, size=n_a)
-                grid_b = l2_grid_per_anchor[idx].mean(axis=0)
-                f = fit_p_one_pass(angles_deg, grid_b, thresh, ma)
-                if np.isfinite(f["p"]):
-                    ps.append(f["p"])
-            ps = np.array(ps)
+            base = fit_p_one_pass(angles_deg, mean_grid, thresh, ma,
+                                   exact_geodesic=exact_geodesic)
+            if n_bootstrap == 0:
+                # Fast path: use the point estimate directly. CI fields
+                # are filled with the point estimate so downstream code
+                # that reads p_lo / p_hi still works.
+                p = base["p"] if np.isfinite(base["p"]) else np.nan
+                ps = np.array([p]) if np.isfinite(p) else np.array([])
+            else:
+                ps = []
+                for _ in range(n_bootstrap):
+                    idx = rng.randint(0, n_a, size=n_a)
+                    grid_b = np.median(l2_grid_per_anchor[idx], axis=0)
+                    f = fit_p_one_pass(angles_deg, grid_b, thresh, ma,
+                                        exact_geodesic=exact_geodesic)
+                    if np.isfinite(f["p"]):
+                        ps.append(f["p"])
+                ps = np.array(ps)
             cell = {
                 "p_point": base["p"],
                 "p_median": float(np.median(ps)) if len(ps) else np.nan,

@@ -30,6 +30,24 @@ CODE_KEYS = {
 }
 
 
+def _mwe_keys() -> dict[str, str]:
+    """Lazy directory scan over data/mwe/. Populated on first call so that
+    the registry import is cheap when MWE data isn't present."""
+    try:
+        from data.mwe_prompts import list_mwe_concepts
+    except Exception:
+        return {}
+    # value is the file-stem itself; kept as a dict for parity with
+    # LANG_KEYS / CODE_KEYS so downstream code (family(), get_sign())
+    # can use the same lookup pattern.
+    return {n: n for n in list_mwe_concepts()}
+
+
+# Populated at import time. Re-load by calling _mwe_keys() if you've
+# downloaded new files mid-process.
+MWE_KEYS: dict[str, str] = _mwe_keys()
+
+
 # (module_path, var_name, sign_label_a, sign_label_b, source_module, source_var)
 DIRECTIONS = {
     "Gender": {
@@ -118,6 +136,24 @@ DIRECTIONS = {
         "sign": "slang->literary",
         "source": ("data.slang_prompts_holdout", "SLANG_PROMPTS_HOLDOUT"),
     },
+    "Wealth": {
+        "a": ("data.wealth_prompts", "RICH_PROMPTS"),
+        "b": ("data.wealth_prompts", "POOR_PROMPTS"),
+        "sign": "rich->poor",
+        "source": ("data.rich_prompts_holdout", "RICH_PROMPTS_HOLDOUT"),
+    },
+    "Health": {
+        "a": ("data.health_prompts", "HEALTHY_PROMPTS"),
+        "b": ("data.health_prompts", "SICK_PROMPTS"),
+        "sign": "healthy->sick",
+        "source": ("data.healthy_prompts_holdout", "HEALTHY_PROMPTS_HOLDOUT"),
+    },
+    "Certainty": {
+        "a": ("data.certainty_prompts", "CERTAIN_PROMPTS"),
+        "b": ("data.certainty_prompts", "UNCERTAIN_PROMPTS"),
+        "sign": "certain->uncertain",
+        "source": ("data.certain_prompts_holdout", "CERTAIN_PROMPTS_HOLDOUT"),
+    },
 }
 
 
@@ -149,14 +185,22 @@ TIER1_PAIRS = [
 assert len(TIER1_PAIRS) == 20
 
 
-def all_direction_names() -> list[str]:
-    """Union of semantic + language + code direction names."""
-    return (list(DIRECTIONS) + list(LANG_KEYS) + list(CODE_KEYS))
+def all_direction_names(include_mwe: bool = False) -> list[str]:
+    """Union of semantic + language + code (+ optional MWE) direction names.
+
+    Default ``include_mwe=False`` preserves the canonical 33-direction /
+    528-pair behaviour for ``all_pairs()`` and any existing tooling that
+    iterates over the full registry. The MWE-extension scripts pass
+    ``include_mwe=True`` explicitly when they need it."""
+    out = list(DIRECTIONS) + list(LANG_KEYS) + list(CODE_KEYS)
+    if include_mwe:
+        out += list(MWE_KEYS)
+    return out
 
 
-def all_pairs() -> list[tuple[str, str]]:
+def all_pairs(include_mwe: bool = False) -> list[tuple[str, str]]:
     """C(N, 2) ordered pairs (lex order on names) from the full set."""
-    names = all_direction_names()
+    names = all_direction_names(include_mwe=include_mwe)
     out = []
     for i in range(len(names)):
         for j in range(i + 1, len(names)):
@@ -168,6 +212,7 @@ def family(name: str) -> str:
     if name in DIRECTIONS: return "semantic"
     if name in LANG_KEYS: return "language"
     if name in CODE_KEYS: return "code"
+    if name in MWE_KEYS: return "mwe"
     raise KeyError(name)
 
 
@@ -208,6 +253,13 @@ def get_prompts(name: str) -> tuple[list[str], list[str]]:
         en = [ps["en"] for ps in ml]
         b = [ps[CODE_KEYS[name]] for ps in prog]
         return en, b
+    if name in MWE_KEYS:
+        from data.mwe_prompts import load_mwe_concept
+        # sign rule across all families: dir = b - a
+        # For MWE: a = matching_behavior side, b = not_matching_behavior side
+        # so +alpha rotates AWAY from the labelled trait. The Plan calls
+        # this "matching_behavior -> not_matching_behavior" sign convention.
+        return load_mwe_concept(name)
     raise KeyError(name)
 
 
@@ -227,4 +279,5 @@ def get_sign(name: str) -> str:
     if name in DIRECTIONS: return DIRECTIONS[name]["sign"]
     if name in LANG_KEYS: return f"en->{LANG_KEYS[name]}"
     if name in CODE_KEYS: return f"en->{CODE_KEYS[name]}"
+    if name in MWE_KEYS: return "matching->not_matching"
     raise KeyError(name)

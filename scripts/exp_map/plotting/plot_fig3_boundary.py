@@ -36,6 +36,12 @@ def main():
                          "min(max(L2[:,0]), max(L2[0,:])) on the mean grid")
     ap.add_argument("--max_alpha", type=float, default=60.0)
     ap.add_argument("--out_tag", default="")
+    ap.add_argument("--exact", action="store_true",
+                    help="use the exact-geodesic normalization "
+                         "(sin(alpha) cos phi / sin(alpha_1), sin(alpha) "
+                         "sin phi / sin(alpha_2)) instead of the small-"
+                         "angle approximation (alpha cos phi / alpha_1). "
+                         "Adds '_exact' to the default output filename.")
     args = ap.parse_args()
 
     pkl_path = (f"results/exp_map/data/sweeps_2d/sweep2d_{args.target}_L"
@@ -65,12 +71,22 @@ def main():
         raise RuntimeError("axis intercepts not in range; pick a smaller "
                            "threshold or check the L2 grid")
 
-    # Contour points + normalize
+    # Contour points + normalize. Exact-geodesic mode matches the
+    # protocol in lib/superellipse.fit_p_one_pass(exact_geodesic=True).
     contour = extract_contour(angles, median_grid, thresh)
     if contour.size == 0:
         raise RuntimeError("no contour at this threshold")
     cn = contour.astype(float).copy()
-    cn[:, 0] /= theta1; cn[:, 1] /= theta2
+    if args.exact:
+        r_deg = np.hypot(cn[:, 0], cn[:, 1])
+        r_safe = np.where(r_deg > 1e-12, r_deg, 1.0)
+        r_rad = np.deg2rad(r_deg)
+        t1_rad = np.deg2rad(theta1)
+        t2_rad = np.deg2rad(theta2)
+        cn[:, 0] = (np.sin(r_rad) / np.sin(t1_rad)) * (cn[:, 0] / r_safe)
+        cn[:, 1] = (np.sin(r_rad) / np.sin(t2_rad)) * (cn[:, 1] / r_safe)
+    else:
+        cn[:, 0] /= theta1; cn[:, 1] /= theta2
     # filter to first quadrant, away from axes (matches fit_superellipse)
     keep = (cn[:, 0] > 0.05) & (cn[:, 1] > 0.05) \
         & (cn[:, 0] < 1.5) & (cn[:, 1] < 1.5)
@@ -90,25 +106,41 @@ def main():
     xi, yi = superellipse_curve(20)
     ax.plot(xi, yi, ls=(0, (1.8, 2.5)), color="#D9822B", lw=1.6,
             alpha=0.95,
-            label=r"per-feature threshold ($p\to\infty$)")
+            label=r"Per-feature threshold ($p\to\infty$)")
     xc, yc = superellipse_curve(2)
     ax.plot(xc, yc, "-", color="#1F77B4", lw=2.6, alpha=0.95,
             label=r"Euclidean combination ($p=2$)")
 
     cont_angle = np.arctan2(cn[:, 1], cn[:, 0])
     order = np.argsort(cont_angle)
+    res_pct = 100.0 * fit["mean_radial_frac"]
+    # Fitted super-ellipse curve, drawn under the data points so the
+    # markers visually sit on the line they're being fit to.
+    xf, yf = superellipse_curve(p_fit)
+    ax.plot(xf, yf, "-", color="#3a7d3a", lw=2.0, alpha=0.95,
+            label=rf"Super-ellipse fit ($p_{{\mathrm{{fit}}}} = {p_fit:.2f}$)",
+            zorder=4)
     ax.plot(cn[order, 0], cn[order, 1], "o",
             color="#3a3a3a", markersize=4.0, alpha=0.85,
             markeredgecolor="none",
-            label=rf"data  ($p_{{\mathrm{{fit}}}} = {p_fit:.2f}$)",
+            label="Data",
             zorder=5)
+    # Residual reported separately for the caption; printed to stdout.
+    print(f"Caption stat: residual = {res_pct:.2f}%  (n_pts = "
+          f"{fit['n_pts']})")
 
     ax.set_xlim(-0.03, 1.15); ax.set_ylim(-0.03, 1.15)
     ax.set_aspect("equal")
-    ax.set_xlabel(rf"$\theta(\varphi)\cos\varphi / \theta_1$  ({args.d1})",
-                  fontsize=12)
-    ax.set_ylabel(rf"$\theta(\varphi)\sin\varphi / \theta_2$  ({args.d2})",
-                  fontsize=12)
+    if args.exact:
+        x_lab = (rf"$\sin\alpha(\varphi)\cos\varphi / \sin\alpha_1$  "
+                 rf"({args.d1})")
+        y_lab = (rf"$\sin\alpha(\varphi)\sin\varphi / \sin\alpha_2$  "
+                 rf"({args.d2})")
+    else:
+        x_lab = rf"$\alpha(\varphi)\cos\varphi / \alpha_1$  ({args.d1})"
+        y_lab = rf"$\alpha(\varphi)\sin\varphi / \alpha_2$  ({args.d2})"
+    ax.set_xlabel(x_lab, fontsize=12)
+    ax.set_ylabel(y_lab, fontsize=12)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.legend(fontsize=10, loc="lower left", frameon=True, framealpha=0.95)
@@ -116,6 +148,7 @@ def main():
     plt.tight_layout()
     os.makedirs(OUT_DIR, exist_ok=True)
     tag = f"_{args.out_tag}" if args.out_tag else ""
+    if args.exact: tag += "_exact"
     out_png = os.path.join(OUT_DIR,
         f"fig3_boundary_{args.d1}_{args.d2}_{args.target}_L{args.layer}{tag}.png")
     out_pdf = out_png.replace(".png", ".pdf")

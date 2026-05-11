@@ -55,6 +55,11 @@ def main():
                     help="optional override; comma-separated single pair "
                          "like 'Gender,Tense' OR semicolon-separated multiple "
                          "pairs like 'Gender,Tense;Gender,Sentiment'")
+    ap.add_argument("--pairs_file", default=None,
+                    help="optional path to a CSV/text file of pairs. Each "
+                         "line is 'a,b' (any extra columns ignored — the "
+                         "select_mwe_pairs.py CSV is supported directly). "
+                         "Overrides --pairs / --pair_set.")
     ap.add_argument("--pair_set", default="all",
                     choices=["all", "tier1"],
                     help="default 'all' = C(N,2) over semantic+lang+code; "
@@ -65,54 +70,208 @@ def main():
                          "Use to parallelize a model across multiple pods.")
     ap.add_argument("--max_angle", type=float, default=MAX_ANGLE_2D)
     ap.add_argument("--n_steps", type=int, default=N_STEPS_2D)
+    ap.add_argument("--dense_max", type=float, default=None,
+                    help="if set, build a non-uniform angle list: dense "
+                         "region [0, dense_max] at --dense_step, then coarse "
+                         "region (dense_max, max_angle] at --coarse_step. "
+                         "Overrides --n_steps. Filename gets a "
+                         "_d{dense_max}-{dense_step}-{coarse_step} suffix.")
+    ap.add_argument("--dense_step", type=float, default=None)
+    ap.add_argument("--coarse_step", type=float, default=None)
+    ap.add_argument("--dtype", default="bfloat16",
+                    choices=["bfloat16", "float16", "float32", "float64"],
+                    help="model dtype. fp32 needs ~36 GB just for weights; "
+                         "fp64 needs ~72 GB. Use fp64 only on >=80GB cards "
+                         "and only when probing extremely small "
+                         "perturbations where fp32 roundoff matters. "
+                         "Filename gets a _fp64/_fp32/_fp16 suffix when "
+                         "not bf16.")
+    ap.add_argument("--measure_offset", type=int, default=-2,
+                    help="measure layer = n_layers + offset; default -2 "
+                         "(penultimate). Use e.g. -7 for penult-5, -12 for "
+                         "penult-10.")
+    ap.add_argument("--metrics", default="l2",
+                    help="comma-separated subset of {l2,cos,kl}; l2 always "
+                         "stored. KL adds a final-layer forward per grid "
+                         "point and is the slowest.")
+    ap.add_argument("--mode", default="geodesic",
+                    choices=["geodesic", "additive"],
+                    help="geodesic: exp-map (norm-matched). additive: "
+                         "a + sin(alpha) R d_perp. Same chart axes either "
+                         "way.")
+    ap.add_argument("--directions_pkl", default=None,
+                    help="optional path to a prebuilt direction cache "
+                         "(e.g. dirs_gemma_L2_sae.pkl). When set, the "
+                         "script ignores DoM extraction + --pair_set / "
+                         "--pairs and instead pairs every direction in "
+                         "the cache against every other (C(N, 2)). "
+                         "Filename gets a _dir<family> suffix so files "
+                         "don't collide with the canonical run.")
     ap.add_argument("--skip_existing", action="store_true")
+    ap.add_argument("--single_batch_ref", action="store_true",
+                    help="run all n_steps^2 grid points in one forward and "
+                         "use pf[0]=alpha=(0,0) as the within-batch "
+                         "reference. Eliminates the bf16 batch-shape "
+                         "rounding floor at alpha=(0,0) but needs more VRAM. "
+                         "Filename gets a _sbr suffix.")
+    ap.add_argument("--anchor_source", default="fineweb",
+                    choices=["fineweb", "wiki_en", "wiki_zh", "code"],
+                    help="which distribution the 30 anchor prompts come from. "
+                         "Default 'fineweb' keeps the existing filename. Other "
+                         "sources append a _src<label> suffix so files don't "
+                         "collide with the canonical run.")
     args = ap.parse_args()
 
     cfg = registry.TARGETS[args.target]
     perturb_layer = args.layer
+    metric_set = {m.strip() for m in args.metrics.split(",") if m.strip()}
+    if not metric_set <= {"l2", "cos", "kl"}:
+        raise ValueError(f"unknown metric in {args.metrics}")
+    record_cos = "cos" in metric_set
+    record_kl = "kl" in metric_set
     print(f"[{ts()}] target={args.target} model={cfg['model']} "
-          f"L={perturb_layer}", flush=True)
-    model, tokenizer, device = load_model(cfg["model"], dtype=torch.bfloat16)
+          f"L={perturb_layer} mode={args.mode} metrics={sorted(metric_set)}",
+          flush=True)
+    dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16,
+                 "float32": torch.float32, "float64": torch.float64}
+    model, tokenizer, device = load_model(cfg["model"],
+                                          dtype=dtype_map[args.dtype])
     n_layers = len(_get_blocks(model))
-    measure_layer = n_layers - 2
-    print(f"  n_layers={n_layers} measure_layer={measure_layer}", flush=True)
+    measure_layer = n_layers + args.measure_offset
+    print(f"  n_layers={n_layers} measure_layer={measure_layer} "
+          f"(offset={args.measure_offset})", flush=True)
 
-    if args.pairs:
-        pair_list = []
-        for chunk in args.pairs.split(";"):
-            a, b = chunk.split(",")
-            pair_list.append((a.strip(), b.strip()))
-    elif args.pair_set == "tier1":
-        pair_list = registry.TIER1_PAIRS
+    if args.directions_pkl:
+        with open(args.directions_pkl, "rb") as f:
+            dirs_blob = pickle.load(f)
+        all_dirs = dirs_blob["directions"]
+        signs = dirs_blob.get("signs", {n: "ext" for n in all_dirs})
+        family = dirs_blob.get("family", "ext")
+        names = sorted(all_dirs.keys())
+        pair_list = [(names[i], names[j])
+                     for i in range(len(names))
+                     for j in range(i + 1, len(names))]
+        if args.shard:
+            i, N = (int(x) for x in args.shard.split("/"))
+            pair_list = pair_list[i::N]
+        print(f"[{ts()}] {len(pair_list)} pairs from "
+              f"{args.directions_pkl} (family={family}, "
+              f"N_dirs={len(all_dirs)}, shard={args.shard})", flush=True)
     else:
-        pair_list = registry.all_pairs()
-    if args.shard:
-        i, N = (int(x) for x in args.shard.split("/"))
-        pair_list = sorted(pair_list)[i::N]
-    print(f"[{ts()}] {len(pair_list)} pairs (set={args.pair_set}, "
-          f"shard={args.shard})", flush=True)
+        if args.pairs_file:
+            pair_list = []
+            with open(args.pairs_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"): continue
+                    parts = [p.strip() for p in line.split(",")]
+                    # CSV from select_mwe_pairs.py has 'overlap,a,b'.
+                    # CSV from select_new3_pairs.py has 'a,b' with
+                    # header 'a,b'. Plain 'a,b' lines also work.
+                    if len(parts) == 2 and tuple(p.lower() for p in parts) == ("a", "b"):
+                        continue                        # header for select_new3 csv
+                    if len(parts) == 2:
+                        a, b = parts
+                    elif len(parts) >= 3 and parts[0].lower() == "overlap":
+                        continue                        # header for select_mwe csv
+                    elif len(parts) >= 3:
+                        a, b = parts[1], parts[2]
+                    else:
+                        continue
+                    pair_list.append((a, b))
+            print(f"[{ts()}] loaded {len(pair_list)} pairs from "
+                  f"{args.pairs_file}", flush=True)
+        elif args.pairs:
+            pair_list = []
+            for chunk in args.pairs.split(";"):
+                a, b = chunk.split(",")
+                pair_list.append((a.strip(), b.strip()))
+        elif args.pair_set == "tier1":
+            pair_list = registry.TIER1_PAIRS
+        else:
+            pair_list = registry.all_pairs()
+        if args.shard:
+            i, N = (int(x) for x in args.shard.split("/"))
+            pair_list = sorted(pair_list)[i::N]
+        print(f"[{ts()}] {len(pair_list)} pairs (set={args.pair_set}, "
+              f"shard={args.shard})", flush=True)
 
-    # Decide which directions we actually need based on pair_list (semantic
-    # + language + code as needed); extends an existing cache rather than
-    # rebuilding it from scratch.
-    needed = sorted({n for ab in pair_list for n in ab})
-    dirs_blob = dirlib.extract_all(
-        model, tokenizer, device, args.target, perturb_layer, names=needed)
-    all_dirs = dirs_blob["directions"]
-    signs = dirs_blob["signs"]
+        # Decide which directions we actually need based on pair_list
+        # (semantic + language + code as needed); extends an existing
+        # cache rather than rebuilding it from scratch.
+        needed = sorted({n for ab in pair_list for n in ab})
+        dirs_blob = dirlib.extract_all(
+            model, tokenizer, device, args.target, perturb_layer,
+            names=needed)
+        all_dirs = dirs_blob["directions"]
+        signs = dirs_blob["signs"]
+        family = None
 
-    # FineWeb anchors (shared across pairs)
-    print(f"[{ts()}] loading FineWeb anchors", flush=True)
-    fw = actlib.fineweb_acts(model, tokenizer, device, args.target,
-                              perturb_layer, n=N_ANCHORS)
+    # Anchor activations (shared across pairs). Source defaults to FineWeb;
+    # plan exp_map_anchor_source.md adds wiki_en, wiki_zh, code as ablations.
+    print(f"[{ts()}] loading anchors (source={args.anchor_source})", flush=True)
+    if args.anchor_source == "fineweb":
+        fw = actlib.fineweb_acts(model, tokenizer, device, args.target,
+                                  perturb_layer, n=N_ANCHORS)
+    elif args.anchor_source == "wiki_en":
+        fw = actlib.wiki_acts(model, tokenizer, device, args.target,
+                               perturb_layer, n=N_ANCHORS, language="en")
+    elif args.anchor_source == "wiki_zh":
+        fw = actlib.wiki_acts(model, tokenizer, device, args.target,
+                               perturb_layer, n=N_ANCHORS, language="zh")
+    elif args.anchor_source == "code":
+        fw = actlib.code_acts(model, tokenizer, device, args.target,
+                               perturb_layer, n=N_ANCHORS)
+    else:
+        raise ValueError(f"unknown anchor_source {args.anchor_source}")
     contexts = fw["contexts"]
     activations = fw["activations"]
     print(f"  N={len(activations)}, ||a||={activations.norm(dim=-1).mean():.2f}",
           flush=True)
 
-    angles_deg = np.linspace(0, args.max_angle, args.n_steps)
+    if args.dense_max is not None:
+        if args.dense_step is None or args.coarse_step is None:
+            raise ValueError("--dense_max requires --dense_step and --coarse_step")
+        # dense [0, dense_max] inclusive at dense_step, then coarse
+        # (dense_max, max_angle] at coarse_step starting at dense_max+coarse_step
+        n_dense = int(round(args.dense_max / args.dense_step)) + 1
+        dense = np.linspace(0.0, args.dense_max, n_dense)
+        coarse = np.arange(args.dense_max + args.coarse_step,
+                           args.max_angle + 1e-9, args.coarse_step)
+        angles_deg = np.concatenate([dense, coarse])
+        print(f"  non-uniform angles: {len(dense)} dense + {len(coarse)} "
+              f"coarse = {len(angles_deg)} total. "
+              f"first 5: {angles_deg[:5]}, last 5: {angles_deg[-5:]}",
+              flush=True)
+    else:
+        angles_deg = np.linspace(0, args.max_angle, args.n_steps)
     angles_rad = np.deg2rad(angles_deg)
     parametrize_sha = _git_sha("scripts/exp_map/lib/parametrize.py")
+
+    # filename suffix encodes non-default config
+    variant_suffix = ""
+    if args.measure_offset != -2:
+        variant_suffix += f"_M{args.measure_offset}"
+    if args.mode != "geodesic":
+        variant_suffix += f"_{args.mode}"
+    if metric_set != {"l2"}:
+        variant_suffix += f"_{'+'.join(sorted(metric_set))}"
+    if args.directions_pkl:
+        variant_suffix += f"_dir{family}"
+    if args.single_batch_ref:
+        variant_suffix += "_sbr"
+    if args.dense_max is not None:
+        # encode dense+coarse spec in filename so we don't clobber
+        variant_suffix += (f"_d{args.dense_max:g}-{args.dense_step:g}"
+                           f"-{args.coarse_step:g}")
+    if args.dtype != "bfloat16":
+        variant_suffix += f"_{args.dtype.replace('float', 'fp')}"
+    if args.anchor_source != "fineweb":
+        # Note: the literal `fineweb` token stays in the filename for
+        # back-compat with existing tooling (plot_robustness_beeswarm.py
+        # and friends parse it as a fixed delimiter). The actual anchor
+        # distribution is encoded by this `_src<label>` suffix.
+        variant_suffix += f"_src{args.anchor_source}"
 
     for (a, b) in pair_list:
         if a not in all_dirs or b not in all_dirs:
@@ -120,7 +279,7 @@ def main():
         out_path = os.path.join(
             OUT_DIR,
             f"sweep2d_{args.target}_L{perturb_layer}_{a}__{b}_fineweb_"
-            f"{int(args.max_angle)}deg.pkl")
+            f"{int(args.max_angle)}deg{variant_suffix}.pkl")
         if os.path.exists(out_path) and args.skip_existing:
             print(f"  skip {a}x{b} (exists)"); continue
 
@@ -129,33 +288,41 @@ def main():
         t0 = time.time()
         r = run_2d_per_anchors(model, contexts, activations, d1, d2,
                                 perturb_layer, measure_layer, device,
-                                angles_rad)
+                                angles_rad, mode=args.mode,
+                                record_cos=record_cos, record_kl=record_kl,
+                                single_batch_ref=args.single_batch_ref)
         l2 = r["l2"]
         print(f"  {a:>10s} x {b:<10s} {time.time()-t0:.1f}s "
               f"l2_max={l2.max():.2f}", flush=True)
 
+        hashes_blob = dirs_blob.get("prompt_set_hashes", {})
         out = {
             "chart": CHART,
             "parametrize_git_sha": parametrize_sha,
             "prompt_set_hashes": {
-                a: dirs_blob["prompt_set_hashes"][a],
-                b: dirs_blob["prompt_set_hashes"][b],
+                a: hashes_blob.get(a),
+                b: hashes_blob.get(b),
                 "source": None,  # FineWeb
             },
+            "direction_family": family,
             "seed_anchors": fw.get("seed", 42),
             "seed_random_dirs": None,
-            "direction_signs": {a: signs[a], b: signs[b]},
+            "direction_signs": {a: signs.get(a), b: signs.get(b)},
             "eps_thresholds": eps_thresholds(),
             "model": args.target,
             "model_full": cfg["model"],
             "perturb_layer": perturb_layer,
             "measure_layer": measure_layer,
+            "measure_offset": args.measure_offset,
+            "mode": args.mode,
+            "metrics": sorted(metric_set),
             "direction_labels": (a, b),
             "source_name": "fineweb",
+            "anchor_source": args.anchor_source,
             "angles_deg": angles_deg,
             "n_anchors": len(activations),
-            "l2": l2,
             "anchor_norm_mean": float(activations.norm(dim=-1).mean()),
+            **{k: r[k] for k in r},   # l2 + optional cos, kl
         }
         tmp = out_path + ".tmp"
         with open(tmp, "wb") as f: pickle.dump(out, f)

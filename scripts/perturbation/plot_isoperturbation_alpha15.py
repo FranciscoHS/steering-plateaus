@@ -7,7 +7,7 @@ R(phi) = r_min + (r_max - r_min) * (max_k |cos(phi - alpha_k)|)^q
 for q large -> the response is large near each of the 5 feature spokes and
 flatter (but never zero) in between.
 
-RHS (blue): real Gemma 9B (Formal x Portuguese) data, alpha=15deg, L2 metric.
+RHS (blue): real Gemma 9B (Gender x Tense) data, alpha=15deg, L2 metric.
 This corresponds to zooming in on a single wedge of the LHS between two
 consecutive feature spokes -- so we frame it as an inset/zoom of the cartoon.
 """
@@ -28,7 +28,8 @@ matplotlib.rcParams['font.sans-serif'] = [
 matplotlib.rcParams['mathtext.fontset'] = 'cm'
 
 
-PKL = 'results/fig4_robustness/v2_A_gemma_Formal_Portuguese.pkl'
+PKL = ('results/exp_map/data/sweeps_2d/'
+       'sweep2d_gemma_L2_Gender__Tense_fineweb_60deg.pkl')
 OUT_DIR = 'results/fig4_robustness'
 
 ALPHA_DEG = 15.0
@@ -87,6 +88,13 @@ def data_curve():
             bounds_error=False, fill_value=None)
         per_act[a] = f_interp(pts)
     med = np.median(per_act, axis=0)
+    # Smooth the median across phi (centered moving average, reflect at
+    # the boundaries so phi=0 and phi=pi/2 don't get pulled toward zero).
+    win = 7
+    pad = win // 2
+    padded = np.concatenate([med[1:pad+1][::-1], med, med[-pad-1:-1][::-1]])
+    kernel = np.ones(win) / win
+    med = np.convolve(padded, kernel, mode="valid")
     return phi, med, labels
 
 
@@ -100,10 +108,10 @@ def draw_lhs(ax, xs, ys, spoke_angles, label_idx_d1, label_idx_d2, rmax):
                                     color=SPOKE_GREY))
         if k == label_idx_d1:
             ax.text(x * 1.10, y * 1.10, '$f_1$',
-                    fontsize=18, ha='left', va='center')
+                    fontsize=26, ha='left', va='center')
         elif k == label_idx_d2:
             ax.text(x * 1.10, y * 1.10, '$f_2$',
-                    fontsize=18, ha='center', va='bottom')
+                    fontsize=26, ha='center', va='bottom')
     # close the loop and draw as a line
     xs_closed = np.append(xs, xs[0]); ys_closed = np.append(ys, ys[0])
     ax.plot(xs_closed, ys_closed, '-', color=ORANGE, lw=2.0)
@@ -122,9 +130,9 @@ def draw_rhs(ax, phi, R, rmax_sq):
                                     color=SPOKE_GREY))
     pad = rmax_sq * 0.04
     ax.text(arrow_len + pad, 0, '$f_1$',
-            fontsize=18, ha='left', va='center')
+            fontsize=26, ha='left', va='center')
     ax.text(0, arrow_len + pad, '$f_2$',
-            fontsize=18, ha='center', va='bottom')
+            fontsize=26, ha='center', va='bottom')
     x = R * np.cos(phi); y = R * np.sin(phi)
     ax.plot(x, y, '-', color=BLUE, lw=2.0)
     ax.set_aspect('equal')
@@ -149,9 +157,10 @@ def main():
     fig = plt.figure(figsize=(13, 8.0))
     ax_l = fig.add_axes([0.04, 0.04, 0.45, 0.70])
     ax_r = fig.add_axes([0.55, 0.04, 0.42, 0.70])
-    fig.suptitle('Feature directions are not special', fontsize=28, y=0.96)
-    ax_l.set_title('Predicted under Superposition', fontsize=19, pad=60)
-    ax_r.set_title('Measured', fontsize=19, pad=60)
+    fig.suptitle('Feature Directions Are Not Privileged',
+                 fontsize=38, y=0.97)
+    ax_l.set_title('Predicted under Superposition', fontsize=26, pad=60)
+    ax_r.set_title('Measured', fontsize=26, pad=60)
 
     rmax_lhs = 1.18
     draw_lhs(ax_l, xs_lhs, ys_lhs, spoke_angles,
@@ -172,13 +181,13 @@ def main():
     ax_l.text(mid_x_l - perp_off * np.sin(f1_lhs_angle),
               mid_y_l + perp_off * np.cos(f1_lhs_angle),
               'Model Response',
-              fontsize=12, ha='center', va='bottom',
+              fontsize=18, ha='center', va='bottom',
               rotation=f1_lhs_deg, color='#444444')
     arrow_len_r = rmax_rhs * 0.95
     pad_box_r = rmax_rhs * 0.03
     ax_r.text(arrow_len_r * 0.5, -(pad_box_r + rmax_rhs * 0.07),
               'Model Response',
-              fontsize=12, ha='center', va='top', color='#444444')
+              fontsize=18, ha='center', va='top', color='#444444')
 
 
     # Full box on each panel + dashed connectors as a zoom indicator.
