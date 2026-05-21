@@ -313,6 +313,13 @@ def run_experiment(config, activations_raw, device):
     best_state_dict = None
     steps_since_improvement = 0
 
+    checkpoint_interval = config.get('checkpoint_interval', 0)
+    checkpoint_path = None
+    if checkpoint_interval > 0 and config.get('save_model', False):
+        save_dir = config.get('save_dir', '.')
+        os.makedirs(save_dir, exist_ok=True)
+        checkpoint_path = os.path.join(save_dir, f"{name}_model_inprogress.pt")
+
     for step in range(config['n_steps']):
         idx = torch.randint(0, n_train, (config['batch_size'],))
         batch = activations_train[idx].to(device).float()
@@ -354,6 +361,15 @@ def run_experiment(config, activations_raw, device):
                 steps_since_improvement = 0
             else:
                 steps_since_improvement += val_interval
+
+            if checkpoint_path is not None and step > 0 and step % checkpoint_interval == 0:
+                torch.save({
+                    'state_dict': best_state_dict,
+                    'config': {k: v for k, v in config.items()
+                               if k not in ('save_model', 'save_dir')},
+                    'step': step,
+                    'best_val_cos': best_val_cos,
+                }, checkpoint_path)
 
             if steps_since_improvement >= patience and step > config.get('warmup_steps', 0):
                 print(f"    Early stopping at step {step} "
@@ -740,6 +756,17 @@ ALL_EXPERIMENTS = {
                      'loss': {'type': 'mse'},
                      'dropout': 0.1,
                      'save_model': True},
+
+    # ── Gemma-4-E2B-it layer 10 (d_in=1536) ──
+    # Same hparams as l10_8M_drop (best Qwen run), only d_in changes to match the model.
+    # Hidden dims left at [4096, 4096, 2048] per user instruction (option a).
+    'gemma_l10_8M_drop': {'d_in': 1536,
+                          'k': 32, 'n_steps': 200000, 'activation': 'gelu',
+                          'warmup_steps': 500, 'grad_clip': 0.5,
+                          'loss': {'type': 'mse'},
+                          'dropout': 0.1,
+                          'checkpoint_interval': 10000,
+                          'save_model': True},
 }
 
 
