@@ -206,7 +206,15 @@ def load_fineweb_fixed_length(n, tokenizer, seq_len=5, seed=42, cache_dir="/work
         token_ids_list: list of n tensors, each [seq_len]
     """
     import os
-    cache_file = os.path.join(cache_dir, f"fineweb_n{n}_seq{seq_len}_seed{seed}.pt")
+    # Tokenizer-specific cache key: token ids are tokenizer-dependent, so the
+    # cache MUST NOT be shared across models (e.g. Qwen vs Gemma) or the wrong
+    # token ids get loaded and decode to garbage.
+    if tokenizer is not None:
+        _base = (getattr(tokenizer, 'name_or_path', '') or '').rstrip('/').split('/')[-1]
+        tok_tag = _base.replace('-', '_') or f"vocab{getattr(tokenizer, 'vocab_size', 0)}"
+    else:
+        tok_tag = 'none'
+    cache_file = os.path.join(cache_dir, f"fineweb_{tok_tag}_n{n}_seq{seq_len}_seed{seed}.pt")
     if os.path.exists(cache_file):
         token_ids_list = torch.load(cache_file, weights_only=True)
         print(f"Loaded {len(token_ids_list)} cached FineWeb samples from {cache_file}")

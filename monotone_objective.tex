@@ -1,0 +1,53 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb}
+\usepackage[margin=1in]{geometry}
+\begin{document}
+
+\subsection*{Pair objective with a monotonicity (inside-the-box) penalty}
+
+We optimize a pair of unit directions $(d_1,d_2)$ jointly. Per anchor $a$ and
+perturbation angle $\alpha$, the norm-matched perturbations along $d_1$, $d_2$,
+and their equal mix give downstream $L^2$ responses $R_1(\alpha)$, $R_2(\alpha)$,
+$R_{\mathrm{mix}}(\alpha)$.
+
+\paragraph{Reward (unchanged).} Push the mix into the plateau relative to the
+axes:
+\[
+\mathcal{L}_{\mathrm{ratio}}
+= \big\langle\, R_{\mathrm{mix}}(\alpha)\,/\,(R_1(\alpha)+R_2(\alpha)) \,\big\rangle_{a,\alpha}.
+\]
+
+\paragraph{Monotonicity penalty (new).} The model
+$R=F\!\big(\sum_i w_i|\hat f_i\!\cdot v|^p\big)$ is a sum of non-negative terms,
+so adding a component cannot reduce the response: every iso-response point lies
+\emph{at or inside the square}. Equivalently, the mix at $\alpha$ has the same
+projection onto $d_1$ as a pure-$d_1$ perturbation at $\alpha'$ with
+\[
+\sin\alpha' = \sin\alpha\,\cos\tfrac{\pi}{4} = \sin\alpha/\sqrt2,
+\]
+plus an extra $d_2$ component, hence the model requires
+\[
+R_{\mathrm{mix}}(\alpha) \;\ge\; \max\big(R_1(\alpha'),\,R_2(\alpha')\big).
+\]
+Cancellation (points \emph{outside} the box) is the only way to violate this.
+Penalize the dimensionless shortfall:
+\[
+\mathcal{L}_{\mathrm{box}}
+= \Big\langle\, \mathrm{ReLU}\!\Big(1 - \frac{R_{\mathrm{mix}}(\alpha)}{\max\big(R_1(\alpha'),R_2(\alpha')\big)}\Big) \,\Big\rangle_{a,\alpha}.
+\]
+It is $0$ everywhere at/inside the box and positive only for cancellation.
+
+\paragraph{Orthogonality (unchanged).}
+$\mathcal{L}_{\mathrm{orth}} = (\hat d_1\!\cdot\hat d_2)^2$.
+
+\paragraph{Total.}
+\[
+\mathcal{L} = \mathcal{L}_{\mathrm{ratio}}
++ \lambda_{\mathrm{box}}\,\mathcal{L}_{\mathrm{box}}
++ \lambda_{\mathrm{orth}}\,\mathcal{L}_{\mathrm{orth}}.
+\]
+Minimizing this still rewards a plateau-extending mix, but the optimizer can no
+longer reach $R_{\mathrm{mix}}\!\approx\!0$ by walking outside the model
+(cancellation); the lowest legitimate value sits at the box ($p\to\infty$).
+
+\end{document}
