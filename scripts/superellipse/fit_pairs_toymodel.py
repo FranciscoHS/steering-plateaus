@@ -138,10 +138,13 @@ def main():
                     help='denoising-repo TwoLayerNet checkpoint (model.pt)')
     ap.add_argument('--denoising_repo', default='~/Research/denoising',
                     help='path to the denoising repo (for mft_denoising import)')
+    ap.add_argument('--leg1', default='feature', choices=['feature', 'random'],
+                    help="first leg: 'feature' (true feature e_f, f not in S) or "
+                         "'random' (unit Gaussian, S coords zeroed)")
     ap.add_argument('--leg2', default='random', choices=['random', 'feature'],
                     help="second leg: 'feature' (another true feature e_g, "
                          "g not in S, g != f) or 'random' (unit Gaussian, S "
-                         "coords zeroed, orthogonalized to e_f)")
+                         "coords zeroed, orthogonalized to leg1)")
     ap.add_argument('--n_pairs', type=int, default=100)
     ap.add_argument('--taus', type=float, nargs='+', default=[0.1, 0.2, 0.5],
                     help='fixed absolute L2 thresholds (replicates phase1 beeswarm)')
@@ -157,7 +160,7 @@ def main():
 
     if args.out is None:
         args.out = ('results/dictionary/toymodel_phase1_tanh3/'
-                    f'fit_pairs_feature_vs_{args.leg2}')
+                    f'fit_pairs_{args.leg1}_vs_{args.leg2}')
     os.makedirs(args.out, exist_ok=True)
     device = torch.device(args.device)
     rng = np.random.default_rng(args.seed)
@@ -181,8 +184,17 @@ def main():
     p_by_tau = {t: [] for t in taus}
 
     for k in range(args.n_pairs):
-        f = int(rng.choice(inactive))
-        u = torch.zeros(d, device=device); u[f] = 1.0
+        # --- leg 1 (u) ---
+        if args.leg1 == 'feature':
+            f = int(rng.choice(inactive))
+            u_np = np.zeros(d); u_np[f] = 1.0
+        else:
+            f = None
+            u_np = rng.standard_normal(d)
+            u_np[list(S)] = 0.0
+            u_np /= np.linalg.norm(u_np)
+        u = torch.from_numpy(u_np.astype(np.float32)).to(device)
+        # --- leg 2 (v) ---
         if args.leg2 == 'feature':
             g = int(rng.choice([i for i in inactive if i != f]))
             v = torch.zeros(d, device=device); v[g] = 1.0
@@ -191,8 +203,8 @@ def main():
             v_np = rng.standard_normal(d)
             v_np[list(S)] = 0.0
             v_np /= np.linalg.norm(v_np)
-            # orthogonalize to u (=e_f) and renormalize (fsec random convention)
-            v_np[f] = 0.0
+            # orthogonalize to leg1 u and renormalize (fsec random convention)
+            v_np -= float(v_np @ u_np) * u_np
             v_np /= np.linalg.norm(v_np)
             v = torch.from_numpy(v_np.astype(np.float32)).to(device)
 
@@ -209,14 +221,15 @@ def main():
         })
 
         if (k + 1) % 20 == 0 or k == 0:
+            leg1_lab = f'f={f:4d}' if f is not None else 'rand'
             leg2_lab = f'g={g:4d}' if g is not None else 'rand'
             ptxt = '  '.join(f'tau{t}:p={ps[t]:.2f}' for t in taus)
-            print(f'  [{k + 1:>3}/{args.n_pairs}] f={f:4d} {leg2_lab}  {ptxt}',
+            print(f'  [{k + 1:>3}/{args.n_pairs}] {leg1_lab} {leg2_lab}  {ptxt}',
                   flush=True)
 
     # Aggregate per tau
     summary = {}
-    pair_lab = f'feature x {args.leg2}'
+    pair_lab = f'{args.leg1} x {args.leg2}'
     print(f'\n=== Pair-level summary ({pair_lab}, d={d}, n={args.n_pairs}) ===')
     for t in taus:
         v = np.array(p_by_tau[t], float); v = v[np.isfinite(v)]
