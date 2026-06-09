@@ -372,6 +372,15 @@ def main():
             g.choice(act_all.shape[0], size=m, replace=False), device=device)
         return act_all[idxs], ctx_all[idxs], f_refs_all[idxs]
 
+    # Per-step scaffold contrast resampling: fresh subset of the semantic
+    # scaffold each gradient step, deterministic in (atom k, step). Enables
+    # --contrast_source scaffold --contrast_resample step.
+    def scaffold_contrast_step(k, step):
+        g = np.random.default_rng((args.seed * 3_000_003 + k) * 100_003 + step)
+        m = min(args.n_contrast, scaffold_full.shape[0])
+        idxs = g.choice(scaffold_full.shape[0], size=m, replace=False)
+        return scaffold_full[torch.as_tensor(idxs, device=device)].to(torch.float32)
+
     print('\n=== Building dictionary ===', flush=True)
     t_start = time.time()
     all_histories = []          # full per-step history (only if --save_history)
@@ -390,10 +399,15 @@ def main():
         # Contrast dirs d_c: scaffold subset or fresh random unit dirs.
         contrast_fn = None
         if args.contrast_source == 'scaffold':
-            scaf_idx = rng.choice(scaffold_full.shape[0],
-                                  size=args.n_contrast, replace=False)
-            scaf = scaffold_full[torch.tensor(scaf_idx, device=device)]
-            scaf_idx = scaf_idx.tolist()
+            if args.contrast_resample == 'step':
+                contrast_fn = lambda step, _k=k: scaffold_contrast_step(_k, step)
+                scaf = scaffold_contrast_step(k, 0)        # placeholder; unused
+                scaf_idx = 'step-resampled'
+            else:
+                scaf_idx = rng.choice(scaffold_full.shape[0],
+                                      size=args.n_contrast, replace=False)
+                scaf = scaffold_full[torch.tensor(scaf_idx, device=device)]
+                scaf_idx = scaf_idx.tolist()
         elif args.contrast_resample == 'step':
             scaf = random_contrast_step(k, 0)          # placeholder, unused
             contrast_fn = lambda step, _k=k: random_contrast_step(_k, step)
