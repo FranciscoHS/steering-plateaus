@@ -162,6 +162,13 @@ def main():
                     help='activations .pt for PCA fitting + mean-baseline')
     ap.add_argument('--sae_ckpt', default=None)
     ap.add_argument('--sae_K', type=int, nargs='+', default=[50, 100])
+    ap.add_argument('--no_center_omp', action='store_false', dest='center_omp',
+                    default=True,
+                    help='by default OMP (dict/random) reconstructs the '
+                         'mean-subtracted activation and adds the mean back (a '
+                         "free bias, like PCA's mu / the SAE's b_dec), so all "
+                         'methods are compared apples-to-apples; this disables '
+                         'it (raw reconstruction).')
     ap.add_argument('--out', required=True)
     ap.add_argument('--dtype', default='bfloat16',
                     choices=['float32', 'bfloat16', 'float16'])
@@ -238,10 +245,28 @@ def main():
         print('\n[sanity] mean (recon = pool mean):', flush=True)
         eval_source('mean', {0: mean_act})
 
+    # Free mean for the OMP methods (parity with PCA's mu and the SAE's b_dec):
+    # reconstruct (a - mu) and add mu back. mu is the pool mean if available
+    # (no held leakage), else the held-set mean.
+    if args.center_omp:
+        if A_pool is not None:
+            mu_omp = A_pool.mean(dim=0, keepdim=True)
+            mu_src = 'pool'
+        else:
+            mu_omp = act.mean(dim=0, keepdim=True)
+            mu_src = 'held'
+        print(f'\nOMP free-mean: {mu_src} mean (de-mean before OMP)', flush=True)
+    else:
+        mu_omp = torch.zeros(1, d_model, device=device)
+        print('\nOMP free-mean: OFF (raw reconstruction)', flush=True)
+
+    def omp_recon(Dmat, K):
+        return mu_omp + omp_reconstruct_at_K(Dmat, act - mu_omp, K, device,
+                                             chunk=args.omp_chunk)
+
     # --- Our dictionary (OMP) ---
     print(f'\n[OMP] dict ({N} atoms)', flush=True)
-    recs = {K: omp_reconstruct_at_K(D, act, K, device, chunk=args.omp_chunk)
-            for K in K_eval}
+    recs = {K: omp_recon(D, K) for K in K_eval}
     results['kl_dict'] = eval_source('dict', recs)
 
     # --- Random same N ---
@@ -250,8 +275,7 @@ def main():
     D_rand = torch.randn(N, d_model, generator=g, device=device,
                          dtype=torch.float32)
     D_rand = D_rand / D_rand.norm(dim=-1, keepdim=True)
-    recs = {K: omp_reconstruct_at_K(D_rand, act, K, device,
-                                    chunk=args.omp_chunk) for K in K_eval}
+    recs = {K: omp_recon(D_rand, K) for K in K_eval}
     results['kl_rand_sameN'] = eval_source(f'rand_{N}', recs)
 
     # --- Random wide ---
@@ -261,8 +285,7 @@ def main():
         D_wide = torch.randn(args.rand_wide_N, d_model, generator=g2,
                              device=device, dtype=torch.float32)
         D_wide = D_wide / D_wide.norm(dim=-1, keepdim=True)
-        recs = {K: omp_reconstruct_at_K(D_wide, act, K, device,
-                                        chunk=args.omp_chunk) for K in K_eval}
+        recs = {K: omp_recon(D_wide, K) for K in K_eval}
         results['kl_rand_wide'] = eval_source(f'rand_{args.rand_wide_N}', recs)
         results['rand_wide_N'] = args.rand_wide_N
 
@@ -318,7 +341,8 @@ def main():
     ax.set_xscale('log', base=2); ax.set_yscale('log')
     ax.set_xlabel('K (atoms / active features)')
     ax.set_ylabel(r'mean $KL(p_{\mathrm{ref}}\,\|\,p_{\mathrm{recon}})$')
-    ax.set_title(f'KL reconstruction  ({args.model} L{args.layer}->end)')
+    _fair = 'free-mean OMP' if args.center_omp else 'raw OMP'
+    ax.set_title(f'KL reconstruction  ({args.model} L{args.layer}->end; {_fair})')
     ax.legend(fontsize=9); ax.grid(True, alpha=0.3, which='both')
     plot_path = os.path.join(args.out, 'kl_rec.png')
     plt.savefig(plot_path, dpi=150, bbox_inches='tight')

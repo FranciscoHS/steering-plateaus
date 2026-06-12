@@ -59,7 +59,9 @@ def optimize_one_atom(model, acts_stack, ctx_stack, f_refs_stack,
                       layer, measure_layer, device, d_model,
                       n_steps, lr, lam_scaffold, lam_prev,
                       chunk_k, seed, log_every, contrast_fn=None,
-                      objective='ratio', soft_p_cfg=None, act_fn=None):
+                      objective='ratio', soft_p_cfg=None, act_fn=None,
+                      align_pool=None, align_topk=100, lam_align=0.0,
+                      lam_resp=1.0):
     """Optimize one dictionary atom d_k.
 
     scaffold:    [K_scaf, d]  fixed contrast dirs for this atom (used when
@@ -89,7 +91,11 @@ def optimize_one_atom(model, acts_stack, ctx_stack, f_refs_stack,
         optimizer.zero_grad()
 
         p_hat = None
-        if objective == 'soft_p':
+        if lam_resp == 0.0:
+            # Ablation: drop the response/plateau term entirely (skip the
+            # model forward it would need) and optimize on the other terms only.
+            resp_loss = torch.zeros((), device=device)
+        elif objective == 'soft_p':
             p_hat = soft_p_estimate(
                 model, acts_stack, ctx_stack, f_refs_stack, d, contrast,
                 layer, measure_layer,
@@ -120,10 +126,20 @@ def optimize_one_atom(model, acts_stack, ctx_stack, f_refs_stack,
             prev_overlap = ((du.unsqueeze(0) * prev_stack).sum(-1) ** 2).mean()
         else:
             prev_overlap = torch.zeros((), device=device)
+        # Corpus-presence term: mean of the top-k |centered cos| between the
+        # atom and the alignment pool. Features must not only have high p but
+        # also actually appear in some activations; maximizing the top-k
+        # (rather than the mean) respects feature sparsity.
+        if align_pool is not None and lam_align != 0.0:
+            align_score = (align_pool @ du).abs().topk(
+                min(align_topk, align_pool.shape[0])).values.mean()
+        else:
+            align_score = torch.zeros((), device=device)
 
-        loss = (resp_loss
+        loss = (lam_resp * resp_loss
                 + lam_scaffold * scaffold_overlap
-                + lam_prev * prev_overlap)
+                + lam_prev * prev_overlap
+                - lam_align * align_score)
         loss.backward()
         optimizer.step()
         with torch.no_grad():
@@ -135,6 +151,7 @@ def optimize_one_atom(model, acts_stack, ctx_stack, f_refs_stack,
             'p_hat': p_hat.item() if p_hat is not None else float('nan'),
             'scaffold_overlap': scaffold_overlap.item(),
             'prev_overlap': prev_overlap.item(),
+            'align': align_score.item(),
         })
         if log_every > 0 and (step % log_every == 0 or step == n_steps - 1):
             extra = (f'p_hat={p_hat.item():.3f}' if p_hat is not None
@@ -157,10 +174,13 @@ def main():
                     help='total dictionary size')
     ap.add_argument('--act_pool_size', type=int, default=8000,
                     help='size of FineWeb activation pool to sample from')
-    ap.add_argument('--contrast_source', choices=['scaffold', 'random'],
+    ap.add_argument('--contrast_source',
+                    choices=['scaffold', 'random', 'scaffold_grow'],
                     default='random',
-                    help='contrast dirs d_c: sampled semantic scaffold, or '
-                         'fresh random unit dirs per atom')
+                    help='contrast dirs d_c: sampled semantic scaffold, '
+                         'fresh random unit dirs per atom, or scaffold_grow '
+                         '(pool starts as the scaffold and grows with every '
+                         'found atom; sampled per step)')
     ap.add_argument('--n_contrast', type=int, default=10,
                     help='# of contrast dirs per atom (replaces '
                          '--scaffold_sample_size)')
@@ -171,6 +191,16 @@ def main():
                     help='random contrast: sample once per atom, or fresh '
                          'every gradient step (anti-overfitting). '
                          'Only applies to --contrast_source random.')
+    ap.add_argument('--lam_resp', type=float, default=1.0,
+                    help='coefficient of the response/plateau-breaking term; '
+                         'set 0 for the ablation that drops it (and skips its '
+                         'model forward), optimizing on the other terms only')
+    ap.add_argument('--lam_align', type=float, default=0.0,
+                    help='coefficient of the corpus-presence term (top-k '
+                         'mean |centered cos| with the activation pool); '
+                         '0 disables')
+    ap.add_argument('--align_topk', type=int, default=100,
+                    help='k for the corpus-presence top-k mean')
     ap.add_argument('--resample_act', choices=['direction', 'step'],
                     default='direction',
                     help="activation/anchor: one fixed per direction "
@@ -278,7 +308,9 @@ def main():
           f'resample_act={args.resample_act} '
           f'n_act_per_step={args.n_act_per_step} '
           f'n_steps={args.n_steps} lr={args.lr} '
-          f'lam_scaffold={args.lam_scaffold} lam_prev={args.lam_prev}',
+          f'lam_resp={args.lam_resp} '
+          f'lam_scaffold={args.lam_scaffold} lam_prev={args.lam_prev} '
+          f'lam_align={args.lam_align} align_topk={args.align_topk}',
           flush=True)
     if args.objective in ('soft_p', 'diag_rho'):
         print(f'  {args.objective}: n_rays={args.n_rays} n_radii={args.n_radii} '
@@ -286,7 +318,7 @@ def main():
               f'n_newton={args.n_newton} tau_frac={args.tau_frac}', flush=True)
 
     # Scaffold (all 17 semantic dirs) — only needed for scaffold contrast.
-    if args.contrast_source == 'scaffold':
+    if args.contrast_source in ('scaffold', 'scaffold_grow'):
         scaffold_full = load_or_build_scaffold(model, tokenizer, device,
                                                args.model, args.layer,
                                                SEMANTIC_NAMES)
@@ -323,6 +355,19 @@ def main():
             f_refs_all[i:j] = forward_from_layer_to_layer(
                 model, ctx_b, pts, args.layer, measure_layer).float()
     print('  done.', flush=True)
+
+    # Corpus-presence pool: all token positions of the activation pool
+    # except position 0 (attention-sink outliers would dominate the top-k),
+    # centered and normalized so align_pool @ d is the centered cosine.
+    align_pool = None
+    if args.lam_align > 0:
+        A = torch.cat([ctx_all[:, 1:].reshape(-1, ctx_all.shape[-1]).float(),
+                       act_all], dim=0)
+        A = A - A.mean(0)
+        align_pool = A / (A.norm(dim=-1, keepdim=True) + 1e-8)
+        print(f'Alignment pool: {align_pool.shape[0]} centered unit vecs '
+              f'(top-{args.align_topk}, lam_align={args.lam_align})',
+              flush=True)
 
     # Dictionary buffer + optional resume.
     ckpt_path = os.path.join(args.results_dir, 'dictionary.pt')
@@ -381,6 +426,25 @@ def main():
         idxs = g.choice(scaffold_full.shape[0], size=m, replace=False)
         return scaffold_full[torch.as_tensor(idxs, device=device)].to(torch.float32)
 
+    # scaffold_grow: contrast pool = scaffold + all atoms found so far,
+    # sampled uniformly per step. Found atoms thus serve double duty as
+    # contrast dirs (objective) and prev dirs (diversity penalty).
+    def grow_contrast_step(k, step):
+        g = np.random.default_rng((args.seed * 3_000_003 + k) * 100_003 + step)
+        n_scaf = scaffold_full.shape[0]
+        pool_size = n_scaf + k
+        m = min(args.n_contrast, pool_size)
+        idxs = g.choice(pool_size, size=m, replace=False)
+        idxs = torch.as_tensor(idxs, device=device)
+        out = torch.empty(m, scaffold_full.shape[1], device=device,
+                          dtype=torch.float32)
+        is_scaf = idxs < n_scaf
+        if is_scaf.any():
+            out[is_scaf] = scaffold_full[idxs[is_scaf]].to(torch.float32)
+        if (~is_scaf).any():
+            out[~is_scaf] = dictionary[idxs[~is_scaf] - n_scaf]
+        return out
+
     print('\n=== Building dictionary ===', flush=True)
     t_start = time.time()
     all_histories = []          # full per-step history (only if --save_history)
@@ -398,7 +462,11 @@ def main():
             idx = None                                   # no single anchor
         # Contrast dirs d_c: scaffold subset or fresh random unit dirs.
         contrast_fn = None
-        if args.contrast_source == 'scaffold':
+        if args.contrast_source == 'scaffold_grow':
+            contrast_fn = lambda step, _k=k: grow_contrast_step(_k, step)
+            scaf = grow_contrast_step(k, 0)                # placeholder; unused
+            scaf_idx = 'grow-step-resampled'
+        elif args.contrast_source == 'scaffold':
             if args.contrast_resample == 'step':
                 contrast_fn = lambda step, _k=k: scaffold_contrast_step(_k, step)
                 scaf = scaffold_contrast_step(k, 0)        # placeholder; unused
@@ -424,7 +492,9 @@ def main():
             args.n_steps, args.lr, args.lam_scaffold, args.lam_prev,
             args.batch_chunk_k, args.seed * 1_000_003 + k,
             args.log_every_step, contrast_fn=contrast_fn,
-            objective=args.objective, soft_p_cfg=soft_p_cfg, act_fn=act_fn)
+            objective=args.objective, soft_p_cfg=soft_p_cfg, act_fn=act_fn,
+            align_pool=align_pool, align_topk=args.align_topk,
+            lam_align=args.lam_align, lam_resp=args.lam_resp)
         dictionary[k] = d_k
         metadata['atoms'].append({
             'k': k, 'act_idx': idx, 'scaf_idx': scaf_idx,
@@ -433,6 +503,7 @@ def main():
             'final_p_hat': hist[-1]['p_hat'],
             'final_scaffold_overlap': hist[-1]['scaffold_overlap'],
             'final_prev_overlap': hist[-1]['prev_overlap'],
+            'final_align': hist[-1]['align'],
         })
         if args.save_history:
             all_histories.append({'k': k, 'history': hist})

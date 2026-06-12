@@ -1,35 +1,43 @@
 #!/usr/bin/env python3
 """Neuronpedia-style static HTML dashboard for found dictionary directions.
 
-For a selected subset of atoms d_k from a dictionary.pt, this builds a single
-browsable HTML page that mimics a Neuronpedia feature dashboard:
+For a selected set of directions, builds a single browsable HTML page that
+mimics a Neuronpedia feature dashboard:
 
-  - Activation histogram (distribution of a . d_k over a FineWeb corpus, all
-    token positions, pos-0/BOS skipped).
-  - Top activating examples: the highest-scoring snippets, with EVERY token
-    background-coloured by its projection score (orange = positive,
-    blue = negative), so you can read what the direction fires on in context.
-  - Logit effects: W_U @ ln_f(d_k), top promoted (green) and suppressed (red)
-    vocab tokens — the direct vocab effect / logit lens of the direction.
+  - Activation histogram (distribution of the per-token score over a FineWeb
+    corpus, all positions, pos-0/BOS skipped).
+  - Top activating examples: highest-scoring snippets, with EVERY token
+    background-coloured by its score (orange = positive, blue = negative).
+  - Logit effects: W_U @ ln_f(d_k), top promoted (green) / suppressed (red).
 
-Score = a . d_k with d_k unit. This is the same projection used by
-dict_max_activating.py; here we keep the full per-token score grid for the
-selected atoms so we can highlight whole snippets and draw histograms.
+Per-token SCORE depends on --score_mode:
+  - dot          : a . d_k                 (raw projection; norm-sensitive)
+  - cos_centered : (a - abar).d_k / ||a - abar||   (centered cosine; removes
+                   the norm outliers and the shared-mean component — matches
+                   rank_directions_featureness.py)
 
-No server, no database — just one self-contained .html file you open in a
-browser. Forward passes need the GPU, so run on a pod (like dict_max_activating):
+Which directions get rendered:
+  - default: the atoms named by --atoms (e.g. '0-49').
+  - if --ranking_pkl is given: a CONTRAST BAND built from the feature-ness
+    ranking — the top-N by kurtosis, a band of median-kurtosis atoms, the
+    bottom-N, and a few random unit directions as a hard null. Each card is
+    labelled with its group + kurtosis so you can eyeball top-vs-baseline.
+
+No server, no DB — one self-contained .html. Run on a pod (needs the model):
 
     HF_HOME=/workspace/hf_cache python -u \
       scripts/superellipse/build_neuronpedia_dashboard.py \
-      --dict_path results/dictionary/qwen3-1.7b_L14_K8000/dictionary.pt \
-      --model qwen3-1.7b --layer 14 --atoms 0-49 \
-      --n_seqs 2000 --seq_len 64 --n_examples 20 \
-      --out results/dictionary/qwen3-1.7b_L14_K8000/dashboard
+      --dict_path /tmp/dict_25k_snapshot.pt --model qwen3-1.7b --layer 14 \
+      --score_mode cos_centered \
+      --ranking_pkl .../featureness_25k/ranking.pkl \
+      --n_top 50 --n_median 10 --n_bottom 10 --n_random 5 \
+      --out .../dashboard_top50
 """
 
 import argparse
 import html
 import os
+import pickle
 import sys
 
 sys.path.insert(0, '.')
@@ -57,11 +65,7 @@ def parse_atoms(spec, K):
 
 
 def color_for_score(score, vmax_pos, vmax_neg):
-    """Background colour for a token given its projection score.
-
-    Positive -> orange (Neuronpedia-style), negative -> blue, both with alpha
-    proportional to magnitude relative to the per-atom max. Returns a CSS rgba.
-    """
+    """Token background: orange for positive, blue for negative, alpha ~ |score|."""
     if score >= 0:
         a = min(1.0, score / vmax_pos) if vmax_pos > 0 else 0.0
         return f'rgba(255,140,0,{a:.3f})'
@@ -76,7 +80,7 @@ def svg_histogram(scores, n_bins=50, width=440, height=120):
     lo, hi = float(scores.min()), float(scores.max())
     if hi <= lo:
         hi = lo + 1e-6
-    counts, edges = np.histogram(scores, bins=n_bins, range=(lo, hi))
+    counts, _ = np.histogram(scores, bins=n_bins, range=(lo, hi))
     cmax = max(1, int(counts.max()))
     bw = width / n_bins
     bars = []
@@ -86,7 +90,6 @@ def svg_histogram(scores, n_bins=50, width=440, height=120):
         y = height - 18 - bh
         bars.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{bw-0.6:.1f}" '
                     f'height="{bh:.1f}" fill="#888"/>')
-    # zero line
     if lo < 0 < hi:
         zx = (0 - lo) / (hi - lo) * width
         bars.append(f'<line x1="{zx:.1f}" y1="0" x2="{zx:.1f}" '
@@ -99,20 +102,66 @@ def svg_histogram(scores, n_bins=50, width=440, height=120):
             + ''.join(bars) + axis + '</svg>')
 
 
+def corpus_mean(model, tok_ids, layer, batch_size, device):
+    """Mean layer-L activation over all tokens (pos-0 skipped)."""
+    N, T = tok_ids.shape
+    s = None; n = 0
+    for i in range(0, N, batch_size):
+        bt = tok_ids[i:i + batch_size].to(device)
+        with torch.no_grad():
+            h = model(bt, output_hidden_states=True).hidden_states[layer + 1]
+        h = h[:, 1:, :].float().reshape(-1, h.shape[-1])
+        s = h.sum(0) if s is None else s + h.sum(0)
+        n += h.shape[0]
+    return (s / n)
+
+
+def score_corpus(model, tok_ids, D_sel, layer, batch_size, device,
+                 score_mode, abar):
+    """Per-token scores [N, T, Ksel] for the selected directions."""
+    N, T = tok_ids.shape
+    Ksel = D_sel.shape[0]
+    seq_scores = torch.empty(N, T, Ksel, dtype=torch.float32)
+    for i in range(0, N, batch_size):
+        bt = tok_ids[i:i + batch_size].to(device)
+        with torch.no_grad():
+            h = model(bt, output_hidden_states=True).hidden_states[layer + 1].float()
+            if score_mode == 'cos_centered':
+                hc = h - abar
+                hc = hc / hc.norm(dim=-1, keepdim=True).clamp_min(1e-9)
+                sc = hc @ D_sel.T
+            else:
+                sc = h @ D_sel.T
+        seq_scores[i:i + bt.shape[0]] = sc.cpu()
+    return seq_scores
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--dict_path', required=True)
     ap.add_argument('--model', default='qwen3-1.7b')
     ap.add_argument('--layer', type=int, default=14)
+    ap.add_argument('--score_mode', default='dot',
+                    choices=['dot', 'cos_centered'])
     ap.add_argument('--atoms', default='0-49',
-                    help="which atoms to render, e.g. '0-49' or '0,3,7'")
+                    help="manual mode: which atoms, e.g. '0-49' or '0,3,7'")
+    ap.add_argument('--ranking_pkl', default=None,
+                    help='featureness ranking.pkl -> build a contrast band '
+                         '(top/median/bottom/random) instead of --atoms')
+    ap.add_argument('--n_top', type=int, default=50)
+    ap.add_argument('--n_median', type=int, default=10)
+    ap.add_argument('--n_bottom', type=int, default=10)
+    ap.add_argument('--n_random', type=int, default=5)
+    ap.add_argument('--random_seed', type=int, default=0)
     ap.add_argument('--n_seqs', type=int, default=2000)
     ap.add_argument('--seq_len', type=int, default=64)
-    ap.add_argument('--n_examples', type=int, default=20,
-                    help='top activating snippets per atom')
+    ap.add_argument('--n_examples', type=int, default=20)
     ap.add_argument('--ctx_left', type=int, default=20)
     ap.add_argument('--ctx_right', type=int, default=8)
     ap.add_argument('--topk_logits', type=int, default=15)
+    ap.add_argument('--n_top_tokens', type=int, default=20,
+                    help='# of distinct top-activating token TYPES to list '
+                         '(Neuronpedia-style "top activating tokens")')
     ap.add_argument('--seed', type=int, default=123)
     ap.add_argument('--batch_size', type=int, default=64)
     ap.add_argument('--out', required=True)
@@ -130,55 +179,95 @@ def main():
     D_full = blob['dictionary'].to(torch.float32)
     D_full = D_full / (D_full.norm(dim=-1, keepdim=True) + 1e-12)
     K_full, d_model = D_full.shape
-    atoms = parse_atoms(args.atoms, K_full)
-    print(f'Dictionary: {K_full} atoms, rendering {len(atoms)}: '
-          f'{atoms[:5]}{"..." if len(atoms) > 5 else ""}', flush=True)
-    D = D_full[atoms].to(device)                      # [Ksel, d]
-    Ksel = D.shape[0]
+    names_full = blob.get('names')   # e.g. contrastive dicts carry labels
 
-    # --- Corpus + per-token score grid for the selected atoms -------------
-    print(f'Loading {args.n_seqs} FineWeb seqs (seq_len={args.seq_len})',
-          flush=True)
+    # --- Build the set of directions to render (entries) ------------------
+    # entry: {group, atom (int|None), kurt (float|None), tail (float|None), dir}
+    entries = []
+    abar_from_rank = None
+    if args.ranking_pkl:
+        rk = pickle.load(open(args.ranking_pkl, 'rb'))
+        order = np.asarray(rk['order']); kurt = rk['kurtosis']; tail = rk['tail_ratio']
+        abar_from_rank = rk.get('abar')
+        top = order[:args.n_top]
+        mid = len(order) // 2
+        h = args.n_median
+        median = order[mid - h // 2: mid - h // 2 + h] if h > 0 else []
+        bottom = order[-args.n_bottom:] if args.n_bottom > 0 else []
+        for grp, idxs in [('top', top), ('median', median), ('bottom', bottom)]:
+            for a in idxs:
+                a = int(a)
+                entries.append({'group': grp, 'atom': a, 'kurt': float(kurt[a]),
+                                'tail': float(tail[a]), 'dir': D_full[a]})
+        g = torch.Generator().manual_seed(args.random_seed)
+        for r in range(args.n_random):
+            v = torch.randn(d_model, generator=g)
+            entries.append({'group': 'random', 'atom': None, 'kurt': None,
+                            'tail': None, 'dir': v / v.norm()})
+        print(f'Contrast band: {args.n_top} top / {args.n_median} median / '
+              f'{args.n_bottom} bottom / {args.n_random} random '
+              f'= {len(entries)} cards', flush=True)
+    else:
+        for a in parse_atoms(args.atoms, K_full):
+            entries.append({'group': 'manual', 'atom': a, 'kurt': None,
+                            'tail': None, 'dir': D_full[a],
+                            'name': names_full[a] if names_full else None})
+        print(f'Rendering {len(entries)} atoms (manual)', flush=True)
+
+    D_sel = torch.stack([e['dir'] for e in entries]).to(device)
+    Ksel = D_sel.shape[0]
+
+    # --- Corpus + per-token scores ----------------------------------------
+    print(f'Loading {args.n_seqs} FineWeb seqs (seq_len={args.seq_len})', flush=True)
     tok_list = load_fineweb_fixed_length(args.n_seqs, tokenizer,
                                          seq_len=args.seq_len, seed=args.seed)
-    tok_ids = torch.stack(tok_list)                   # [N, T] cpu
+    tok_ids = torch.stack(tok_list)
     N, T = tok_ids.shape
 
-    print('Capturing activations + scoring', flush=True)
-    seq_scores = torch.empty(N, T, Ksel, dtype=torch.float32)   # cpu
-    for i in range(0, N, args.batch_size):
-        bt = tok_ids[i:i + args.batch_size].to(device)
-        with torch.no_grad():
-            h = model(bt, output_hidden_states=True).hidden_states[args.layer + 1]
-            sc = h.float() @ D.T                      # [b, T, Ksel]
-        seq_scores[i:i + bt.shape[0]] = sc.cpu()
+    abar = None
+    if args.score_mode == 'cos_centered':
+        if abar_from_rank is not None:
+            abar = torch.as_tensor(abar_from_rank, dtype=torch.float32, device=device)
+            print('Using abar from ranking.pkl (same corpus)', flush=True)
+        else:
+            print('Computing corpus mean abar', flush=True)
+            abar = corpus_mean(model, tok_ids, args.layer, args.batch_size, device)
+
+    print(f'Scoring corpus (score_mode={args.score_mode})', flush=True)
+    seq_scores = score_corpus(model, tok_ids, D_sel, args.layer,
+                              args.batch_size, device, args.score_mode, abar)
     print('  done.', flush=True)
 
-    # Pre-decode tokens per sequence (individual decode keeps it readable).
     def decode_tok(tid):
         return tokenizer.decode([int(tid)])
 
-    # --- Logit lens for the selected atoms --------------------------------
+    # --- Logit lens -------------------------------------------------------
     print('Computing logit lens', flush=True)
     lm_head = _get_lm_head(model)
     ln_f = _get_final_norm(model)
-    W_U = lm_head.weight.detach().float()             # [vocab, d]
+    W_U = lm_head.weight.detach().float()
     ln_dtype = next(ln_f.parameters()).dtype
     with torch.no_grad():
-        ln_D = ln_f(D.to(ln_dtype)).float()           # [Ksel, d]
-        logits = (ln_D @ W_U.T.to(device)).cpu()      # [Ksel, vocab]
+        ln_D = ln_f(D_sel.to(ln_dtype)).float()
+        logits = (ln_D @ W_U.T.to(device)).cpu()
 
     # --- Render -----------------------------------------------------------
     css = """
     body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;
          background:#f4f4f4;color:#222}
-    .nav{position:fixed;top:0;left:0;width:140px;height:100%;overflow-y:auto;
+    .nav{position:fixed;top:0;left:0;width:150px;height:100%;overflow-y:auto;
          background:#222;color:#ddd;padding:8px;font-size:12px;box-sizing:border-box}
-    .nav a{display:block;color:#9cf;text-decoration:none;padding:2px 0}
-    .main{margin-left:156px;padding:16px;max-width:920px}
+    .nav a{display:block;color:#9cf;text-decoration:none;padding:1px 0}
+    .nav .grp{color:#fc8;margin-top:8px;font-weight:bold}
+    .main{margin-left:166px;padding:16px;max-width:920px}
+    .sec{font-size:20px;margin:26px 0 8px;border-bottom:2px solid #ccc;padding-bottom:4px}
     .card{background:#fff;border:1px solid #ddd;border-radius:8px;padding:16px;
           margin-bottom:24px}
-    .card h2{margin:0 0 8px;font-size:18px}
+    .card h2{margin:0 0 4px;font-size:17px}
+    .badge{display:inline-block;font-size:11px;padding:1px 7px;border-radius:10px;
+           color:#fff;margin-left:8px;vertical-align:middle}
+    .b-top{background:#1a7f37}.b-median{background:#b08900}.b-bottom{background:#c0392b}
+    .b-random{background:#666}.b-manual{background:#345}
     .stat{color:#666;font-size:13px;margin-bottom:10px}
     .cols{display:flex;gap:24px;flex-wrap:wrap}
     .logit-col{font-size:12px;font-family:ui-monospace,monospace}
@@ -188,72 +277,109 @@ def main():
     .ex .tgt{outline:1.5px solid #c33;border-radius:2px}
     .exscore{color:#999;font-size:11px;margin-right:6px}
     h3{font-size:13px;color:#444;margin:14px 0 4px}
+    .toktop{display:flex;flex-wrap:wrap;gap:4px;margin:4px 0 8px}
+    .tokchip{font-family:ui-monospace,monospace;font-size:12px;padding:2px 6px;
+             border-radius:4px;border:1px solid #ccc;white-space:pre}
+    .tokchip .cs{color:#555;font-size:10px;margin-left:4px}
     """
-    nav = ['<div class="nav"><b>atoms</b><br>']
-    for k in atoms:
-        nav.append(f'<a href="#a{k}">atom {k}</a>')
-    nav.append('</div>')
+    group_titles = {'top': f'TOP {args.n_top} by kurtosis',
+                    'median': f'MEDIAN band (n={args.n_median})',
+                    'bottom': f'BOTTOM {args.n_bottom} by kurtosis',
+                    'random': f'RANDOM null (n={args.n_random})',
+                    'manual': 'Atoms'}
 
+    nav = ['<div class="nav"><b>cards</b>']
     body = ['<div class="main">',
-            f'<h1>Dictionary dashboard — {html.escape(args.model)} '
-            f'L{args.layer}</h1>',
-            f'<p class="stat">{os.path.basename(os.path.dirname(args.dict_path) or args.dict_path)} '
-            f'· {N} seqs × {T} tok · projection a·d_k (unit d_k)</p>']
+            f'<h1>Dictionary dashboard — {html.escape(args.model)} L{args.layer}</h1>',
+            f'<p class="stat">{html.escape(os.path.basename(args.dict_path))} · '
+            f'{N} seqs × {T} tok · score_mode={args.score_mode}</p>']
 
-    for j, k in enumerate(atoms):
-        s_all = seq_scores[:, 1:, j].reshape(-1).numpy()   # skip pos0
+    last_group = None
+    for j, e in enumerate(entries):
+        grp = e['group']
+        anchor = f'c{j}'
+        if grp != last_group:
+            nav.append(f'<div class="grp">{group_titles.get(grp, grp)}</div>')
+            body.append(f'<div class="sec" id="sec_{grp}">{group_titles.get(grp, grp)}</div>')
+            last_group = grp
+        label = (f'atom {e["atom"]}' if e['atom'] is not None
+                 else f'random #{j}')
+        if e.get('name'):
+            label = f'{e["name"]} (atom {e["atom"]})'
+        nav.append(f'<a href="#{anchor}">{label}</a>')
+
+        s_all = seq_scores[:, 1:, j].reshape(-1).numpy()
         vmax_pos = float(np.percentile(s_all[s_all > 0], 99)) if (s_all > 0).any() else 1.0
         vmax_neg = float(np.percentile(-s_all[s_all < 0], 99)) if (s_all < 0).any() else 1.0
         gmax = float(s_all.max()) if s_all.size else 0.0
         gmean = float(s_all.mean()) if s_all.size else 0.0
         frac_pos = float((s_all > 0).mean()) if s_all.size else 0.0
 
-        body.append(f'<div class="card" id="a{k}">')
-        body.append(f'<h2>Atom {k}</h2>')
-        body.append(f'<div class="stat">max={gmax:.2f} · mean={gmean:.3f} · '
+        body.append(f'<div class="card" id="{anchor}">')
+        kbadge = (f' <span class="badge b-{grp}">{grp}</span>')
+        body.append(f'<h2>{label}{kbadge}</h2>')
+        rk_txt = ''
+        if e['kurt'] is not None:
+            rk_txt = f'kurtosis={e["kurt"]:.2f} · tailR={e["tail"]:.2f} · '
+        body.append(f'<div class="stat">{rk_txt}max={gmax:.3f} · mean={gmean:.4f} · '
                     f'{frac_pos*100:.1f}% tokens &gt; 0</div>')
 
-        # histogram + logit columns side by side
-        body.append('<div class="cols">')
-        body.append('<div><h3>activation histogram</h3>'
-                    + svg_histogram(s_all) + '</div>')
+        # top activating TOKEN TYPES (distinct tokens by their peak activation)
+        flat_sc = seq_scores[:, 1:, j].reshape(-1)
+        flat_tok = tok_ids[:, 1:].reshape(-1)
+        order_tok = torch.argsort(flat_sc, descending=True)
+        seen_tok = set(); toplist = []
+        for oi in order_tok.tolist():
+            tid = int(flat_tok[oi])
+            if tid in seen_tok:
+                continue
+            seen_tok.add(tid); toplist.append((tid, float(flat_sc[oi])))
+            if len(toplist) >= args.n_top_tokens:
+                break
+        body.append('<h3>top activating tokens</h3><div class="toktop">')
+        for tid, sc in toplist:
+            bg = color_for_score(sc, vmax_pos, vmax_neg)
+            body.append(f'<span class="tokchip" style="background:{bg}" '
+                        f'title="{sc:.3f}">{html.escape(decode_tok(tid))}'
+                        f'<span class="cs">{sc:.2f}</span></span>')
+        body.append('</div>')
 
+        body.append('<div class="cols">')
+        body.append('<div><h3>activation histogram</h3>' + svg_histogram(s_all) + '</div>')
         lg = logits[j]
         top_pos = torch.topk(lg, args.topk_logits)
         top_neg = torch.topk(-lg, args.topk_logits)
         body.append('<div class="logit-col"><h3>logit effect (W_U·ln_f(d))</h3>')
-        body.append('<table><tr><td style="padding-right:18px">'
-                    '<b>promoted</b><br>')
+        body.append('<table><tr><td style="padding-right:18px"><b>promoted</b><br>')
         for v, idx in zip(top_pos.values, top_pos.indices):
-            tok = html.escape(repr(decode_tok(idx)))
-            body.append(f'<span class="pos">{float(v):+6.3f}</span> {tok}<br>')
+            body.append(f'<span class="pos">{float(v):+6.3f}</span> '
+                        f'{html.escape(repr(decode_tok(idx)))}<br>')
         body.append('</td><td><b>suppressed</b><br>')
         for v, idx in zip(top_neg.values, top_neg.indices):
-            tok = html.escape(repr(decode_tok(idx)))
-            body.append(f'<span class="neg">{-float(v):+6.3f}</span> {tok}<br>')
+            body.append(f'<span class="neg">{-float(v):+6.3f}</span> '
+                        f'{html.escape(repr(decode_tok(idx)))}<br>')
         body.append('</td></tr></table></div></div>')
 
-        # top activating examples
         body.append('<h3>top activating examples</h3>')
-        pos_scores = seq_scores[:, 1:, j]                  # [N, T-1]
-        seq_max, seq_argmax = pos_scores.max(dim=1)        # over positions
-        order = torch.argsort(seq_max, descending=True)[:args.n_examples]
-        for rank, si in enumerate(order.tolist()):
-            peak_pos = int(seq_argmax[si]) + 1             # +1: pos0 skipped
+        pos_scores = seq_scores[:, 1:, j]
+        seq_max, seq_argmax = pos_scores.max(dim=1)
+        order_ex = torch.argsort(seq_max, descending=True)[:args.n_examples]
+        for si in order_ex.tolist():
+            peak_pos = int(seq_argmax[si]) + 1
             lo = max(1, peak_pos - args.ctx_left)
             hi = min(T, peak_pos + args.ctx_right + 1)
             spans = []
             for p in range(lo, hi):
                 sc = float(seq_scores[si, p, j])
-                tok = html.escape(decode_tok(tok_ids[si, p]))
                 cls = ' class="tgt"' if p == peak_pos else ''
                 bg = color_for_score(sc, vmax_pos, vmax_neg)
                 spans.append(f'<span{cls} style="background:{bg}" '
-                             f'title="{sc:.3f}">{tok}</span>')
+                             f'title="{sc:.3f}">{html.escape(decode_tok(tok_ids[si, p]))}</span>')
             body.append(f'<div class="ex"><span class="exscore">'
-                        f'{float(seq_max[si]):.2f}</span>{"".join(spans)}</div>')
+                        f'{float(seq_max[si]):.3f}</span>{"".join(spans)}</div>')
         body.append('</div>')
 
+    nav.append('</div>')
     body.append('</div>')
 
     out_html = os.path.join(args.out, 'dashboard.html')
