@@ -437,6 +437,16 @@ def main():
         plt.savefig(bpath, dpi=150, bbox_inches='tight', facecolor='white')
         plt.close()
         print(f'Saved {bpath}')
+        # Also one standalone figure per pair.
+        for (b, title, l1, l2) in boundary_panels:
+            pfig, pax = plt.subplots(figsize=(7, 6))
+            draw_panel(pax, b, title, d1lab=l1, d2lab=l2)
+            plt.tight_layout()
+            ppath = os.path.join(args.out, f'boundary_{l1}_{l2}.png')
+            pfig.savefig(ppath, dpi=150, bbox_inches='tight',
+                         facecolor='white')
+            plt.close(pfig)
+            print(f'Saved {ppath}')
 
 
 if __name__ == '__main__':
