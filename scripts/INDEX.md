@@ -9,6 +9,16 @@ Quick reference: "I want to do X — which script do I run?"
 - **Real vs random points sweep (chess only):** `perturbation/sweep_random_points_chess.py`
 - **Run Gemma sweeps:** `perturbation/run_gemma_sweeps.sh`
 
+## J-Lens superellipse experiment (qwen3-8b)
+Superellipse p-fitting on J-Lens (Jacobian Lens) token-direction pairs,
+EN vs ZH. See `Plans/jlens_superellipse_qwen3_8b.md`.
+- **Download/inspect pre-fitted lens:** `jlens/download_inspect_lens.py`
+- **Build direction pairs (pod):** `jlens/build_jlens_directions.py`
+- **Iso-plateau sweeps + p fits (pod):** `jlens/sweep_isoplateau_jlens.py`
+- **Beeswarm + shape panels:** `jlens/plot_jlens_p.py`
+- **Single-pair shape plot (original style):** `jlens/plot_jlens_shape_single.py`
+- **Sweep L2-range diagnostic:** `jlens/inspect_sweep_range.py`
+
 ## Jacobian analysis
 - **Compute Jacobian eigenspectrum:** `jacobian/run_jacobian_v2.py`
 - **Analyze optimized deltas:** `jacobian/analyze_delta.py`
