@@ -37,6 +37,28 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from src.model import load_model, _get_blocks
+
+
+def neuron_dirs_at_layer(model, layer, which='out'):
+    """Residual-stream directions of the MLP neurons at `layer`.
+
+    which='out': columns of down_proj (W_out) — the direction each neuron writes
+        into the residual stream. down_proj.weight is [d_model, d_mlp], so the
+        write directions are its columns, i.e. weight.T -> [d_mlp, d_model].
+    which='in': rows of up_proj (W_in) — the direction each neuron reads.
+
+    Returns a unit-normalized [d_mlp, d_model] float32 tensor (on CPU).
+    """
+    block = _get_blocks(model)[layer]
+    mlp = block.mlp
+    if which == 'out':
+        W = mlp.down_proj.weight.detach().float().t().contiguous()  # [d_mlp, d_model]
+    elif which == 'in':
+        W = mlp.up_proj.weight.detach().float().contiguous()        # [d_mlp, d_model]
+    else:
+        raise ValueError(which)
+    W = W / (W.norm(dim=-1, keepdim=True) + 1e-12)
+    return W.cpu()
 from src.data import load_fineweb_fixed_length
 from scripts.superellipse.learn_superellipse_dict import (
     extract_context_and_activation,
@@ -110,12 +132,19 @@ def main():
     ap.add_argument('--n_pool_bootstrap', type=int, default=2000,
                     help='bootstrap reps for the pair-level pooled-p CI')
     ap.add_argument('--leg1_source', default='dict',
-                    choices=['dict', 'scaffold'],
+                    choices=['dict', 'scaffold', 'neuron'],
                     help="first leg of each pair")
     ap.add_argument('--leg2_source', default='dict',
-                    choices=['dict', 'scaffold', 'random'],
+                    choices=['dict', 'scaffold', 'random', 'neuron'],
                     help="second leg of each pair: 'dict', 'scaffold' (one of "
-                         "the 17 contrastive dirs), or 'random' (unit Gaussian)")
+                         "the 17 contrastive dirs), 'random' (unit Gaussian), or "
+                         "'neuron' (MLP neuron basis at --neuron_layer)")
+    ap.add_argument('--neuron_layer', type=int, default=None,
+                    help="layer whose MLP neurons form the 'neuron' pool "
+                         "(default: --layer, the perturbation layer)")
+    ap.add_argument('--neuron_which', default='out', choices=['out', 'in'],
+                    help="neuron direction: 'out' = down_proj columns (write "
+                         "direction, default), 'in' = up_proj rows (read direction)")
     ap.add_argument('--random_seed', type=int, default=12345,
                     help="seed for 'random' leg-2 direction sampling")
     ap.add_argument('--out', required=True)
@@ -211,6 +240,15 @@ def main():
         print(f'Scaffold (semantic-only): shape={tuple(scaffold.shape)}',
               flush=True)
 
+    # Optional neuron pool (for either leg sourcing from 'neuron')
+    neurons = None
+    if 'neuron' in (args.leg1_source, args.leg2_source):
+        nlayer = args.neuron_layer if args.neuron_layer is not None else args.layer
+        neurons = neuron_dirs_at_layer(model, nlayer, which=args.neuron_which)
+        neurons = neurons.to(device)
+        print(f'Neuron basis (W_{args.neuron_which}) at layer {nlayer}: '
+              f'shape={tuple(neurons.shape)}', flush=True)
+
     # Optional random pool (for leg2_source='random')
     rand_dirs = None
     if args.leg2_source == 'random':
@@ -233,6 +271,7 @@ def main():
         if src == 'dict': return atom_max - atom_min
         if src == 'scaffold': return scaffold.shape[0]
         if src == 'random': return rand_dirs.shape[0]
+        if src == 'neuron': return neurons.shape[0]
         raise ValueError(src)
 
     K1 = pool_size(args.leg1_source)
@@ -270,6 +309,7 @@ def main():
         if src == 'dict': return D[atom_min + idx].cpu()
         if src == 'scaffold': return scaffold[idx].cpu()
         if src == 'random': return rand_dirs[idx].cpu()
+        if src == 'neuron': return neurons[idx].cpu()
         raise ValueError(src)
 
     for k, (i, j) in enumerate(pairs):

@@ -61,7 +61,9 @@ def optimize_one_atom(model, acts_stack, ctx_stack, f_refs_stack,
                       chunk_k, seed, log_every, contrast_fn=None,
                       objective='ratio', soft_p_cfg=None, act_fn=None,
                       align_pool=None, align_topk=100, lam_align=0.0,
-                      lam_resp=1.0):
+                      lam_resp=1.0,
+                      maha_W=None, maha_mu=None, lam_maha=0.0,
+                      maha_cos=1.0, maha_sin=0.0):
     """Optimize one dictionary atom d_k.
 
     scaffold:    [K_scaf, d]  fixed contrast dirs for this atom (used when
@@ -136,10 +138,29 @@ def optimize_one_atom(model, acts_stack, ctx_stack, f_refs_stack,
         else:
             align_score = torch.zeros((), device=device)
 
+        # Off-manifold penalty: rotate each anchor toward the atom by a fixed
+        # angle (maha_cos/sin) and penalize the increase in Mahalanobis distance
+        # to the natural activation distribution (W = Sigma^{-1/2}, mu). This
+        # pulls atoms toward directions that stay on-manifold under perturbation.
+        if maha_W is not None and lam_maha != 0.0:
+            a = acts_stack.to(torch.float32)                       # [n_act, d]
+            nrm = a.norm(dim=1, keepdim=True)
+            ahat = a / (nrm + 1e-10)
+            coef = ahat @ du                                       # [n_act]
+            e = du.unsqueeze(0) - coef.unsqueeze(1) * ahat
+            e = e / (e.norm(dim=1, keepdim=True) + 1e-10)
+            x_rot = nrm * (maha_cos * ahat + maha_sin * e)         # [n_act, d]
+            dM_rot = ((x_rot - maha_mu) @ maha_W).norm(dim=1)
+            dM_base = ((a - maha_mu) @ maha_W).norm(dim=1)
+            maha_pen = (dM_rot - dM_base).mean()                   # mean Delta dM
+        else:
+            maha_pen = torch.zeros((), device=device)
+
         loss = (lam_resp * resp_loss
                 + lam_scaffold * scaffold_overlap
                 + lam_prev * prev_overlap
-                - lam_align * align_score)
+                - lam_align * align_score
+                + lam_maha * maha_pen)
         loss.backward()
         optimizer.step()
         with torch.no_grad():
@@ -152,6 +173,7 @@ def optimize_one_atom(model, acts_stack, ctx_stack, f_refs_stack,
             'scaffold_overlap': scaffold_overlap.item(),
             'prev_overlap': prev_overlap.item(),
             'align': align_score.item(),
+            'maha': maha_pen.item(),
         })
         if log_every > 0 and (step % log_every == 0 or step == n_steps - 1):
             extra = (f'p_hat={p_hat.item():.3f}' if p_hat is not None
@@ -237,6 +259,17 @@ def main():
                     help='penalty on (d_k . d_c)^2; default 0 for random '
                          'contrast, 1.0 for scaffold')
     ap.add_argument('--lam_prev', type=float, default=1.0)
+    ap.add_argument('--lam_maha', type=float, default=0.0,
+                    help='absolute coefficient of the off-manifold (ΔMahalanobis) '
+                         'penalty; normally set via --lam_maha_rel instead')
+    ap.add_argument('--lam_maha_rel', type=float, default=0.0,
+                    help='if >0, lam_maha = this * lam_maha_base, where '
+                         'lam_maha_base equalizes median |response| and median '
+                         'ΔdM over a random-direction calibration set (1.0 = '
+                         'equal weight with the response term).')
+    ap.add_argument('--maha_angle', type=float, default=30.0,
+                    help='fixed geodesic rotation angle (deg) at which ΔMahalanobis '
+                         'is penalized')
     ap.add_argument('--seed', type=int, default=42,
                     help='seed for fineweb pool + per-atom RNG offset')
     ap.add_argument('--act_pool_seed', type=int, default=42,
@@ -355,6 +388,69 @@ def main():
             f_refs_all[i:j] = forward_from_layer_to_layer(
                 model, ctx_b, pts, args.layer, measure_layer).float()
     print('  done.', flush=True)
+
+    # --- Off-manifold (Mahalanobis) penalty setup ---
+    # W = Sigma^{-1/2}, mu from the L14 activation pool (self-consistent with the
+    # anchors being optimized). lam_maha is calibrated so that, at --lam_maha_rel
+    # 1.0, the median ΔdM penalty matches the median response-loss magnitude over
+    # a random-direction set (equal weight with the response term).
+    maha_W = maha_mu = None
+    maha_cos = float(np.cos(np.radians(args.maha_angle)))
+    maha_sin = float(np.sin(np.radians(args.maha_angle)))
+    if args.lam_maha_rel > 0 or args.lam_maha > 0:
+        from sklearn.covariance import LedoitWolf
+        print(f'[maha] estimating Sigma from {act_all.shape[0]} pool acts '
+              f'(angle={args.maha_angle}deg)', flush=True)
+        A_np = act_all.detach().cpu().numpy().astype(np.float64)
+        mu_np = A_np.mean(0)
+        lw = LedoitWolf().fit(A_np - mu_np)
+        ev, U = np.linalg.eigh(lw.covariance_)
+        ev = np.maximum(ev, 1e-12)
+        W_np = (U * ev ** -0.5) @ U.T
+        maha_mu = torch.tensor(mu_np, device=device, dtype=torch.float32)
+        maha_W = torch.tensor(W_np, device=device, dtype=torch.float32)
+        print(f'[maha] Ledoit-Wolf shrinkage={lw.shrinkage_:.4f}', flush=True)
+
+        if args.lam_maha <= 0:
+            cg = torch.Generator(device=device).manual_seed(777)
+            Dcal = torch.randn(48, d_model, generator=cg, device=device)
+            Dcal = Dcal / Dcal.norm(dim=1, keepdim=True)
+            ci = np.random.default_rng(778).choice(
+                act_all.shape[0], size=min(256, act_all.shape[0]), replace=False)
+            a = act_all[ci].float(); nrm = a.norm(dim=1, keepdim=True)
+            ahat = a / (nrm + 1e-10)
+            dM_base = ((a - maha_mu) @ maha_W).norm(dim=1)
+            n_resp = min(args.n_act_per_step if args.resample_act == 'step' else 8,
+                         act_all.shape[0])
+            ri = ci[:n_resp]
+            a_r, ctx_r, fr_r = act_all[ri], ctx_all[ri], f_refs_all[ri]
+            if scaffold_full is not None:
+                cc = scaffold_full[:args.n_contrast].to(torch.float32)
+            else:
+                cg2 = torch.Generator(device=device).manual_seed(99)
+                cc = torch.randn(args.n_contrast, d_model, generator=cg2, device=device)
+                cc = (cc / cc.norm(dim=1, keepdim=True)).to(torch.float32)
+            ddms, resps = [], []
+            with torch.no_grad():
+                for dvec in Dcal:
+                    coef = ahat @ dvec
+                    e = dvec.unsqueeze(0) - coef.unsqueeze(1) * ahat
+                    e = e / (e.norm(dim=1, keepdim=True) + 1e-10)
+                    xr = nrm * (maha_cos * ahat + maha_sin * e)
+                    ddms.append((((xr - maha_mu) @ maha_W).norm(dim=1) - dM_base).mean().item())
+                    rl, _ = batched_ratio_multiangle(
+                        model, a_r, ctx_r, fr_r, dvec, cc, angles_rad,
+                        args.layer, measure_layer, chunk_k=args.batch_chunk_k)
+                    resps.append(abs(rl.item()))
+            med_ddm = float(np.median(ddms)); med_resp = float(np.median(resps))
+            lam_maha_base = med_resp / max(med_ddm, 1e-6)
+            args.lam_maha = args.lam_maha_rel * lam_maha_base
+            args.lam_maha_base = lam_maha_base
+            print(f'[maha] calib: median|resp|={med_resp:.4f} median ΔdM={med_ddm:.3f} '
+                  f'-> lam_maha_base={lam_maha_base:.5f}; rel={args.lam_maha_rel} '
+                  f'-> lam_maha={args.lam_maha:.5f}', flush=True)
+        else:
+            print(f'[maha] using absolute lam_maha={args.lam_maha}', flush=True)
 
     # Corpus-presence pool: all token positions of the activation pool
     # except position 0 (attention-sink outliers would dominate the top-k),
@@ -494,7 +590,9 @@ def main():
             args.log_every_step, contrast_fn=contrast_fn,
             objective=args.objective, soft_p_cfg=soft_p_cfg, act_fn=act_fn,
             align_pool=align_pool, align_topk=args.align_topk,
-            lam_align=args.lam_align, lam_resp=args.lam_resp)
+            lam_align=args.lam_align, lam_resp=args.lam_resp,
+            maha_W=maha_W, maha_mu=maha_mu, lam_maha=args.lam_maha,
+            maha_cos=maha_cos, maha_sin=maha_sin)
         dictionary[k] = d_k
         metadata['atoms'].append({
             'k': k, 'act_idx': idx, 'scaf_idx': scaf_idx,
@@ -504,6 +602,7 @@ def main():
             'final_scaffold_overlap': hist[-1]['scaffold_overlap'],
             'final_prev_overlap': hist[-1]['prev_overlap'],
             'final_align': hist[-1]['align'],
+            'final_maha': hist[-1]['maha'],
         })
         if args.save_history:
             all_histories.append({'k': k, 'history': hist})

@@ -38,6 +38,45 @@ from src.data import load_fineweb_fixed_length
 from src.autoencoders import TopKSAE
 
 
+# ── Gao et al. 2024 init ─────────────────────────────────────────────────
+
+def apply_tied_init(sae, activations, n_sample=100000):
+    """Tied init from Gao et al. 2024: W_enc := W_dec (unit-norm rows),
+    encoder bias 0, b_dec = mean of a sample of cached activations (cheap
+    stand-in for the geometric median)."""
+    with torch.no_grad():
+        sae.W_dec.data = F.normalize(sae.W_dec.data, dim=-1)
+        sae.encoder.weight.data.copy_(sae.W_dec.data)
+        sae.encoder.bias.data.zero_()
+        n = activations.shape[0]
+        idx = torch.randperm(n)[:min(n_sample, n)].sort().values
+        sample = activations[idx].float()
+        sae.b_dec.data.copy_(sample.mean(dim=0).to(sae.b_dec.device))
+    print(f"Tied init: W_enc := W_dec, b_dec = mean of {len(idx)} cached acts")
+
+
+# ── AuxK loss (Gao et al. 2024) ──────────────────────────────────────────
+
+def auxk_loss(sae, batch, recon, pre_acts, dead_mask, k_aux):
+    """Auxiliary reconstruction of the main residual using the top-k_aux
+    dead latents. Returns normalized MSE: ||e - e_hat||^2 / ||e - mean(e)||^2.
+
+    Assumes dead_mask has at least one True entry (caller guards)."""
+    k_aux = min(k_aux, int(dead_mask.sum()))
+    # Select indices on a detached copy (alive latents masked to -1 so they
+    # can never win: pre_acts are post-ReLU >= 0). Decode via dense mask +
+    # matmul: gathering W_dec[aux_idx] would materialize [B, k_aux, d_in]
+    # (17 GB at k_aux=512), which OOMs as the dead count grows.
+    masked = pre_acts.detach().masked_fill(~dead_mask, -1.0)
+    _, aux_idx = masked.topk(k_aux, dim=-1)
+    sel = torch.zeros(pre_acts.shape, dtype=torch.bool, device=pre_acts.device)
+    sel.scatter_(-1, aux_idx, True)
+    recon_aux = (pre_acts * sel) @ sae.W_dec
+    e = (batch - recon).detach()
+    denom = (e - e.mean(dim=0)).pow(2).sum()
+    return (e - recon_aux).pow(2).sum() / (denom + 1e-10)
+
+
 # ── Dead feature resampling ──────────────────────────────────────────────
 
 def resample_dead_features(sae, optimizer, activations, feature_fired, n_sample=8192):
@@ -237,8 +276,13 @@ def train(sae, activations, args, device):
     optimizer = torch.optim.Adam(sae.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.n_steps)
 
-    # Dead feature tracking (from step 0)
+    # Dead feature tracking (from step 0). "Fired" = in the top-k AND value>0
+    # (topk runs on post-ReLU pre-acts, so zero-valued latents occupy top-k
+    # slots; index membership alone is not firing).
     feature_fired = torch.zeros(sae.d_sae, dtype=torch.bool, device=device)
+    last_fired = torch.zeros(sae.d_sae, dtype=torch.long, device=device)
+    fired_counts = torch.zeros(sae.d_sae, dtype=torch.long, device=device)
+    use_auxk = getattr(args, 'auxk', False)
 
     training_log = []
     t_start = time.time()
@@ -259,8 +303,21 @@ def train(sae, activations, args, device):
             batch = activations_gpu[idx]
 
         # Forward
-        recon, top_vals, top_idx = sae(batch)
-        loss = F.mse_loss(recon, batch)
+        top_vals, top_idx, pre_acts = sae.encode(batch)
+        recon = sae.decode(top_vals, top_idx)
+        mse = F.mse_loss(recon, batch)
+        loss = mse
+
+        # AuxK: reconstruct the main residual with the top-k_aux dead latents
+        # (dead = no fire in the last dead_steps_threshold steps; last_fired
+        # inits to 0 so nothing counts as dead before the warmup elapses).
+        aux_val = float('nan')
+        if use_auxk:
+            dead_mask = (step - last_fired) > args.dead_steps_threshold
+            if dead_mask.any():
+                aux = auxk_loss(sae, batch, recon, pre_acts, dead_mask, args.k_aux)
+                loss = loss + args.auxk_alpha * aux
+                aux_val = aux.item()
 
         # Backward
         optimizer.zero_grad()
@@ -271,8 +328,13 @@ def train(sae, activations, args, device):
         # Normalize decoder columns
         sae.normalize_decoder()
 
-        # Track which features fired
-        feature_fired[top_idx.unique()] = True
+        # Track which features fired (top-k AND value > 0)
+        with torch.no_grad():
+            fired = top_idx[top_vals > 0]
+            if fired.numel():
+                feature_fired[fired] = True
+                last_fired[fired] = step
+                fired_counts += torch.bincount(fired, minlength=sae.d_sae)
 
         # Dead feature resampling
         if step > 0 and step % args.resample_interval == 0:
@@ -289,7 +351,8 @@ def train(sae, activations, args, device):
             with torch.no_grad():
                 rel_l2 = (batch - recon).norm(dim=-1).mean() / batch.norm(dim=-1).mean()
                 cos_sim = F.cosine_similarity(batch, recon, dim=-1).mean()
-                n_dead_now = (~feature_fired).sum().item()
+                # True dead count: no fire (value>0) in the last 1000 steps
+                n_dead_now = ((step - last_fired) >= 1000).sum().item()
 
                 # Val metrics on held-out batch
                 sae.eval()
@@ -302,6 +365,8 @@ def train(sae, activations, args, device):
             entry = {
                 'step': step,
                 'loss': loss.item(),
+                'mse': mse.item(),
+                'aux_loss': aux_val,
                 'rel_l2': rel_l2.item(),
                 'cos_sim': cos_sim.item(),
                 'val_rel_l2': val_rel_l2.item(),
@@ -313,7 +378,8 @@ def train(sae, activations, args, device):
 
             if step % (args.log_interval * 10) == 0:
                 elapsed = time.time() - t_start
-                print(f"  Step {step:6d}: loss={loss.item():.6f}, "
+                print(f"  Step {step:6d}: mse={mse.item():.6f}, "
+                      f"aux={aux_val:.4f}, "
                       f"rel_L2={rel_l2.item():.4f}, cos={cos_sim.item():.4f}, "
                       f"val_cos={val_cos.item():.4f}, "
                       f"dead={n_dead_now}, lr={entry['lr']:.2e}, "
@@ -323,7 +389,8 @@ def train(sae, activations, args, device):
     print(f"\nTraining complete: {args.n_steps} steps in {total_time:.1f}s "
           f"({total_time / args.n_steps * 1000:.1f}ms/step)")
 
-    return training_log
+    # torch tensor (not numpy) so the checkpoint stays weights_only-loadable
+    return training_log, fired_counts.cpu()
 
 
 # ── Plotting ─────────────────────────────────────────────────────────────
@@ -386,6 +453,18 @@ def main():
                         help='When reusing a cache, truncate to the first N samples.')
     parser.add_argument('--val_frac', type=float, default=0.1,
                         help='Fraction of cache held out for validation.')
+    # Dead-latent fixes (Gao et al. 2024); off by default so old runs reproduce
+    parser.add_argument('--tied_init', action='store_true',
+                        help='Init W_enc := W_dec, b_enc=0, b_dec=mean act')
+    parser.add_argument('--auxk', action='store_true',
+                        help='AuxK loss: reconstruct residual with dead latents')
+    parser.add_argument('--auxk_alpha', type=float, default=1/32,
+                        help='Weight of the AuxK loss term')
+    parser.add_argument('--k_aux', type=int, default=512,
+                        help='Number of dead latents used by the AuxK term')
+    parser.add_argument('--dead_steps_threshold', type=int, default=2000,
+                        help='Steps without firing before a latent counts as '
+                             'dead for AuxK (also the warmup length)')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -410,15 +489,18 @@ def main():
 
     # ── Train ────────────────────────────────────────────────────────────
     sae = TopKSAE(d_in=d_model, d_sae=args.d_sae, k=args.k).to(device)
+    if args.tied_init:
+        apply_tied_init(sae, activations)
     print(f"\nSAE parameters: {sum(p.numel() for p in sae.parameters()) / 1e6:.1f}M")
 
-    training_log = train(sae, activations, args, device)
+    training_log, fired_counts = train(sae, activations, args, device)
 
     # ── Save ─────────────────────────────────────────────────────────────
     save_data = {
         'state_dict': sae.state_dict(),
         'config': {'d_in': d_model, 'd_sae': args.d_sae, 'k': args.k},
         'training_log': training_log,
+        'fired_counts': fired_counts,
         'args': vars(args),
     }
     weights_path = os.path.join(args.output_dir, "sae_weights.pt")

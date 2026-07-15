@@ -43,27 +43,12 @@ When the user wants to discuss or interpret results, do NOT start writing code. 
 - **Comments:** Explain *why* not *what* for non-obvious choices
 
 ## Project Structure
-```
-~/research/
-├── tools/runpod_cli/        # Shared across projects
-└── projects/steering-plateaus/
-    ├── notebooks/            # Exploration, Colab migrations
-    ├── src/                  # Cleaned-up reusable code
-    ├── scripts/              # Experiment runners (see scripts/INDEX.md for guide)
-    ├── results/              # Outputs, plots, checkpoints
-    ├── writeup/              # Paper drafts, figures
-    ├── requirements.txt
-    └── README.md
-```
+See `scripts/INDEX.md` for a guide to the experiment runner scripts.
 
 ## Dependencies
-Core stack:
-- torch
-- transformers or transformer_lens
-- numpy, matplotlib
-- jupyter
+Core stack: see `requirements.txt`.
 
-Optional / experiment-specific:
+Experiment-specific gotchas:
 - **GLP (Generative Latent Prior):** Used for projecting activations onto learned manifolds. The upstream repo (https://github.com/g-luo/generative_latent_prior) has a complex conda-based setup for vllm/nnsight compat, but for our use case (just loading and running the denoiser) you only need: `pip install omegaconf diffusers && pip install git+https://github.com/g-luo/generative_latent_prior.git`. Install `omegaconf` and `diffusers` first — GLP imports fail without them. Models are loaded from HuggingFace (e.g., `generative-latent-prior/glp-llama8b-d6`). On GPU-constrained setups, load GLP on CPU with `--glp_cpu`.
 - **sae_lens:** Used for loading Gemma Scope and GPT-2 SAEs. `pip install sae_lens`.
 
@@ -71,100 +56,10 @@ Add others as needed during development.
 
 ## RunPod CLI Setup
 
-Uses Stefan Heimersheim's fork: https://github.com/Stefan-Heimersheim/runpod_cli
-
-### One-time setup
-
-1. **Clone and install:**
-   ```bash
-   cd ~/research/tools
-   git clone https://github.com/Stefan-Heimersheim/runpod_cli.git
-   cd runpod_cli
-   pip install -e .
-   ```
-
-2. **Create config file** at `~/.config/runpod_cli/.env`:
-   ```
-   RUNPOD_API_KEY=<your-api-key>
-   RUNPOD_NETWORK_VOLUME_ID=<your-volume-id>
-   RUNPOD_S3_ACCESS_KEY_ID=<your-s3-access-key>
-   RUNPOD_S3_SECRET_KEY=<your-s3-secret-key>
-   GIT_NAME="Your Name"
-   GIT_EMAIL=your@email.com
-   ```
-   Get these from RunPod console. Volume must be in S3-supported region (EUR-IS-1, EU-RO-1, EU-CZ-1, or US-KS-2).
-
-3. **Add SSH public key to RunPod:**
-   - Go to https://www.runpod.io/console/user/settings
-   - Add contents of `~/.ssh/id_ed25519.pub` (or your key) to SSH Public Keys section
-   - **Critical:** Without this, SSH won't work (PUBLIC_KEY=null error)
-
-4. **SSH config include** (auto-created by CLI, but verify):
-   ```bash
-   echo 'Include ~/.ssh/config.runpod_cli' >> ~/.ssh/config
-   ```
-
-### Usage
-
-```bash
-# Named pods (recommended — required for parallel agents)
-rpc create --name chess-exp --gpu_type "RTX 4090" --runtime 600
-ssh runpod-chess-exp                              # SSH alias is runpod-<name>
-rpc terminate --name=chess-exp                    # Terminate by name, cleans up SSH config
-
-# Unnamed pods (single-agent backward compat)
-rpc create --gpu_type "RTX 4090" --runtime 600    # SSH alias is just "runpod"
-ssh runpod
-rpc terminate --pod_id=abc123
-```
-
-**IMPORTANT for parallel agents:** Always use `--name` when creating pods. Each named pod gets its own SSH alias (`runpod-<name>`) so multiple agents can create and use pods simultaneously without clobbering each other's SSH config. Without `--name`, all pods share the single `runpod` alias and the last one wins.
-
-**Note:** GPU availability varies. If one type fails, try others: `RTX 4090`, `RTX 4000 Ada`, `RTX A4000`, `A100 80GB`. The CLI will error with "no instances available" if unavailable.
-
-**Troubleshooting:** If `rpc create` fails during provisioning but the pod is actually running (`rpc list` shows it), the SSH config may not have been updated. Manually get the SSH info:
-
-```python
-import runpod, os
-with open(os.path.expanduser('~/.config/runpod_cli/.env')) as f:
-    for line in f:
-        if line.startswith('RUNPOD_API_KEY='):
-            runpod.api_key = line.strip().split('=', 1)[1]
-for pod in runpod.get_pods():
-    for port in pod.get('runtime', {}).get('ports', []):
-        if port['privatePort'] == 22:
-            print(f"SSH: {port['ip']}:{port['publicPort']}")
-```
-
-Then update `~/.ssh/config.runpod_cli` with the correct HostName and Port.
-
-### Sync workflow
-
-**Important:** The `sync_to_runpod.sh` script may not work reliably. Use `scp` instead (rsync is not installed on RunPod pods):
-
-```bash
-# Sync code TO RunPod (from project root) — replace ALIAS with your pod's SSH alias
-scp -r src/ scripts/ requirements.txt ALIAS:/workspace/steering-plateaus/
-
-# Sync results FROM RunPod — NOTE: use trailing /. on source to avoid nested dirs
-# Wrong: scp -r ALIAS:results/foo/ ./results/foo/  (creates ./results/foo/foo/)
-# Right: scp -r ALIAS:results/foo/. ./results/foo/
-scp -r ALIAS:/workspace/steering-plateaus/results/. ./results/
-
-# Run experiment on RunPod
-ssh ALIAS "cd /workspace/steering-plateaus && python scripts/your_script.py"
-```
-
-The SSH alias is `runpod-<name>` if you used `--name`, or just `runpod` if you didn't.
-
-**Checkpointing:** Build in automatic checkpointing for long runs (spot interruptions)
-
-**Venv workaround:** RunPod base images sometimes have torch/torchvision version mismatches. If you see errors like "torchvision was built for torch 2.8 but you have 2.10", create a venv:
-```bash
-python -m venv venv
-source venv/bin/activate
-pip install torch transformer_lens matplotlib
-```
+See `~/.claude/runpod.md` — the single source of truth for RunPod: provisioning, GPU availability/retry list, reliable CUDA image, sync workflow, troubleshooting, and safety rules. Read it before any RunPod work. Quick reminders:
+- `rpc create --name <slug> --gpu_type "RTX 4090" --runtime 600 -i "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"` → SSH alias `runpod-<slug>`. Always use `--name` so parallel agents don't clobber each other's SSH config.
+- Sync with `scp`, not rsync (not installed on pods); use a trailing `/.` on the source dir when copying results back to avoid nested dirs.
+- Build in automatic checkpointing for long runs (spot interruptions).
 
 ## Coding Priorities
 1. **Reproducibility:** Make experiments easy to re-run

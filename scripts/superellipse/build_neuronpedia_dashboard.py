@@ -6,8 +6,10 @@ mimics a Neuronpedia feature dashboard:
 
   - Activation histogram (distribution of the per-token score over a FineWeb
     corpus, all positions, pos-0/BOS skipped).
-  - Top activating examples: highest-scoring snippets, with EVERY token
-    background-coloured by its score (orange = positive, blue = negative).
+  - Activating examples: by default a random sample from the top
+    --sample_top_frac (default 10%) of sequences ranked by peak score, with
+    EVERY token background-coloured by its score (orange = positive, blue =
+    negative). Set --sample_top_frac<=0 for the strict top-n behaviour.
   - Logit effects: W_U @ ln_f(d_k), top promoted (green) / suppressed (red).
 
 Per-token SCORE depends on --score_mode:
@@ -156,6 +158,13 @@ def main():
     ap.add_argument('--n_seqs', type=int, default=2000)
     ap.add_argument('--seq_len', type=int, default=64)
     ap.add_argument('--n_examples', type=int, default=20)
+    ap.add_argument('--sample_top_frac', type=float, default=0.10,
+                    help='draw the displayed examples by random sampling from '
+                         'the top this-fraction of sequences (ranked by peak '
+                         'score), instead of the strict top-n. <=0 restores '
+                         'the old strict-top-n behaviour.')
+    ap.add_argument('--sample_seed', type=int, default=0,
+                    help='RNG seed for --sample_top_frac example sampling')
     ap.add_argument('--ctx_left', type=int, default=20)
     ap.add_argument('--ctx_right', type=int, default=8)
     ap.add_argument('--topk_logits', type=int, default=15)
@@ -360,10 +369,25 @@ def main():
                         f'{html.escape(repr(decode_tok(idx)))}<br>')
         body.append('</td></tr></table></div></div>')
 
-        body.append('<h3>top activating examples</h3>')
         pos_scores = seq_scores[:, 1:, j]
         seq_max, seq_argmax = pos_scores.max(dim=1)
-        order_ex = torch.argsort(seq_max, descending=True)[:args.n_examples]
+        ranked = torch.argsort(seq_max, descending=True)
+        if args.sample_top_frac > 0:
+            pool_n = max(args.n_examples,
+                         int(round(args.sample_top_frac * ranked.numel())))
+            pool_n = min(pool_n, ranked.numel())
+            pool = ranked[:pool_n]
+            rng = np.random.default_rng(args.sample_seed + j)
+            take = min(args.n_examples, pool_n)
+            pick = rng.choice(pool_n, size=take, replace=False)
+            # show the sampled examples high-to-low score within the sample
+            order_ex = pool[np.sort(pick)]
+            body.append(f'<h3>activating examples '
+                        f'(random sample of {take} from top '
+                        f'{args.sample_top_frac:.0%}, n={pool_n})</h3>')
+        else:
+            order_ex = ranked[:args.n_examples]
+            body.append('<h3>top activating examples</h3>')
         for si in order_ex.tolist():
             peak_pos = int(seq_argmax[si]) + 1
             lo = max(1, peak_pos - args.ctx_left)

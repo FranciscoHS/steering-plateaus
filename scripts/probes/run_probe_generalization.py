@@ -117,6 +117,22 @@ def load_sae_from_hf(repo_id, layer, trainer='trainer_0', device='cpu', dtype=to
     return sae.to(device)
 
 
+def load_sae_from_ckpt(path, device):
+    """Load one of our TopKSAE checkpoints (train_sae.py format) as a SimpleSAE.
+
+    TopKSAE.encode_full is relu(W_enc (x - b_dec) + b_enc), which matches
+    SimpleSAE.encode with threshold 0, so reconstruct_topk works unchanged.
+    """
+    data = torch.load(path, map_location='cpu', weights_only=True)
+    sd = data['state_dict']
+    W_enc = sd['encoder.weight'].float()   # [d_sae, d_in]
+    b_enc = sd['encoder.bias'].float()
+    W_dec = sd['W_dec'].float()            # [d_sae, d_in]
+    b_dec = sd['b_dec'].float()
+    print(f"  Loaded TopKSAE ckpt: d_sae={W_enc.shape[0]}, d_in={W_enc.shape[1]}")
+    return SimpleSAE(W_enc, b_enc, W_dec, b_dec, threshold=0.0).to(device)
+
+
 def reconstruct_topk(sae, activations, k, device, batch_size=256):
     """Encode through SAE, keep top-k features by activation magnitude, decode.
 
@@ -153,6 +169,12 @@ def main():
     parser.add_argument('--sae_trainer', type=str, default='trainer_0',
                         help='trainer_0=L0_80_16k, trainer_1=L0_160_16k, '
                              'trainer_2=L0_80_65k, trainer_3=L0_160_65k')
+    parser.add_argument('--sae_ckpt', type=str, default=None,
+                        help='path to a local TopKSAE sae_weights.pt '
+                             '(train_sae.py format); overrides --sae_repo')
+    parser.add_argument('--sae_label', type=str, default=None,
+                        help='label used in the default results_dir when '
+                             '--sae_ckpt is given')
     parser.add_argument('--n_train', type=int, default=2000)
     parser.add_argument('--n_id_test', type=int, default=500)
     parser.add_argument('--n_ood_test', type=int, default=500)
@@ -165,8 +187,9 @@ def main():
     k_values = [int(k) for k in args.top_k_values.split(',')]
 
     if args.results_dir is None:
+        tag = args.sae_label if args.sae_ckpt else args.sae_trainer
         args.results_dir = (f'results/probe_generalization/'
-                           f'{args.model}_L{args.layer}_{args.sae_trainer}')
+                           f'{args.model}_L{args.layer}_{tag}')
     os.makedirs(args.results_dir, exist_ok=True)
 
     np.random.seed(args.seed)
@@ -189,7 +212,7 @@ def main():
     id_test_labels = np.array([train_labels[i] for i in test_idx])
 
     print("Loading Amazon polarity...")
-    amazon = load_dataset('amazon_polarity', split='test')
+    amazon = load_dataset('fancyzhx/amazon_polarity', split='test')
     ood_idx = np.random.choice(len(amazon), args.n_ood_test, replace=False)
     ood_texts = [amazon[int(i)]['content'] for i in ood_idx]
     ood_labels = np.array([amazon[int(i)]['label'] for i in ood_idx])
@@ -224,8 +247,12 @@ def main():
     torch.cuda.empty_cache()
 
     # --- Load SAE ---
-    print(f"\nLoading SAE: {args.sae_repo} / {args.sae_trainer}")
-    sae = load_sae_from_hf(args.sae_repo, args.layer, args.sae_trainer, device)
+    if args.sae_ckpt:
+        print(f"\nLoading SAE from checkpoint: {args.sae_ckpt}")
+        sae = load_sae_from_ckpt(args.sae_ckpt, device)
+    else:
+        print(f"\nLoading SAE: {args.sae_repo} / {args.sae_trainer}")
+        sae = load_sae_from_hf(args.sae_repo, args.layer, args.sae_trainer, device)
 
     # --- Baseline: raw activations ---
     print("\n=== Raw activations ===")
