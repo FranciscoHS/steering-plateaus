@@ -223,6 +223,9 @@ TARGETS = {
     "mistral": dict(model="mistral-7b-v0.3", perturb_layer=2),
     "aya":     dict(model="aya-expanse-8b",  perturb_layer=2),
     "yi":      dict(model="yi-1.5-9b",       perturb_layer=2),
+    # Qwen3.6-27B workspace-band run (Plans/superellipse_qwen36_27b.md):
+    # L36 ≈ 56% depth, inside Neel's replicated J-Lens workspace band.
+    "qwen36":  dict(model="qwen3.6-27b",     perturb_layer=36),
 }
 
 

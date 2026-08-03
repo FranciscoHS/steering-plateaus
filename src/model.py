@@ -44,10 +44,16 @@ MODEL_ALIASES = {
     'tinystories-28m': 'roneneldan/TinyStories-28M',
     'chess_16L': 'lichess_16layers_ckpt_no_optimizer.pt',
     'chess_8L': 'lichess_8layers_ckpt_no_optimizer.pt',
+    'qwen3.6-27b': 'Qwen/Qwen3.6-27B',
 }
 
 # Multimodal Gemma 3 models (4B+) need Gemma3ForCausalLM to extract the text decoder
 GEMMA3_MULTIMODAL = {'google/gemma-3-4b-pt', 'google/gemma-3-12b-pt', 'google/gemma-3-27b-pt'}
+
+# Qwen3.5/3.6 hybrid models (linear attention + full attention, multimodal
+# wrapper Qwen3_5ForConditionalGeneration). Requires transformers >= 5.0.
+# Text decoder lives at model.model.language_model.
+QWEN3_5_CONDGEN = {'Qwen/Qwen3.6-27B'}
 
 
 def _get_blocks(model):
@@ -55,6 +61,8 @@ def _get_blocks(model):
     model_type = getattr(model, '_plateau_info', {}).get('model_type', '')
     if model_type == 'circuitgpt':
         return model.circuit_model.transformer.h
+    if model_type == 'qwen3_5':
+        return model.model.language_model.layers
     if hasattr(model, 'transformer'):  # GPT-2
         return model.transformer.h
     elif hasattr(model, 'gpt_neox'):  # GPT-NeoX (Pythia)
@@ -69,6 +77,8 @@ def _get_final_norm(model):
     model_type = getattr(model, '_plateau_info', {}).get('model_type', '')
     if model_type == 'circuitgpt':
         return model.circuit_model.transformer.ln_f
+    if model_type == 'qwen3_5':
+        return model.model.language_model.norm
     if hasattr(model, 'transformer'):  # GPT-2
         return model.transformer.ln_f
     elif hasattr(model, 'gpt_neox'):  # GPT-NeoX (Pythia)
@@ -90,7 +100,7 @@ def _get_lm_head(model):
 
 def _is_rope_model(model):
     """True for models that need explicit position_embeddings (Llama/Qwen/Gemma)."""
-    return hasattr(model, '_plateau_info') and model._plateau_info['model_type'] in ('llama', 'gemma3')
+    return hasattr(model, '_plateau_info') and model._plateau_info['model_type'] in ('llama', 'gemma3', 'qwen3_5')
 
 
 def _get_position_embeddings(model, hidden_states):
@@ -105,6 +115,10 @@ def _get_position_embeddings(model, hidden_states):
         For others: (cos, sin) tuple
     """
     position_ids = torch.arange(hidden_states.shape[1], device=hidden_states.device).unsqueeze(0)
+    if model._plateau_info['model_type'] == 'qwen3_5':
+        # Qwen3.5/3.6 mrope: rotary_emb expands 2D position_ids to the
+        # 3 mrope rows itself (text-only input => all rows identical)
+        return model.model.language_model.rotary_emb(hidden_states, position_ids)
     if model._plateau_info['model_type'] == 'gemma3':
         global_emb = model.model.rotary_emb(hidden_states, position_ids)
         local_emb = model.model.rotary_emb_local(hidden_states, position_ids)
@@ -141,7 +155,11 @@ def _run_block(block, hidden, model, pos_emb=None):
     Llama/Qwen/Gemma blocks return a plain tensor.
     """
     model_type = model._plateau_info['model_type']
-    if model_type == 'gemma3':
+    if model_type == 'qwen3_5':
+        # Uniform signature for both linear_attention and full_attention
+        # blocks; attention_mask=None => causal (sdpa) / no padding (linear)
+        result = block(hidden, position_embeddings=pos_emb)
+    elif model_type == 'gemma3':
         global_emb, local_emb = pos_emb
         result = block(hidden, position_embeddings_global=global_emb,
                        position_embeddings_local=local_emb)
@@ -289,6 +307,15 @@ def load_model(model_name='gpt2', device=None, dtype=None):
         tokenizer = AutoTokenizer.from_pretrained(hf_name)
         model_type = 'gemma3'
         d_model = model.config.hidden_size
+    elif hf_name in QWEN3_5_CONDGEN:
+        # Qwen3.5/3.6 hybrid (transformers >= 5.0). `dtype=` kwarg (5.x name).
+        from transformers import Qwen3_5ForConditionalGeneration
+        load_dtype = dtype if dtype is not None else torch.bfloat16
+        model = Qwen3_5ForConditionalGeneration.from_pretrained(
+            hf_name, dtype=load_dtype, device_map=device)
+        tokenizer = AutoTokenizer.from_pretrained(hf_name)
+        model_type = 'qwen3_5'
+        d_model = model.config.text_config.hidden_size
     else:
         load_dtype = dtype if dtype is not None else torch.float32
         model = AutoModelForCausalLM.from_pretrained(
