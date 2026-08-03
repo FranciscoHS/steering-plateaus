@@ -19,6 +19,24 @@ EN vs ZH. See `Plans/jlens_superellipse_qwen3_8b.md`.
 - **Single-pair shape plot (original style):** `jlens/plot_jlens_shape_single.py`
 - **Sweep L2-range diagnostic:** `jlens/inspect_sweep_range.py`
 
+## J-Lens superellipse experiment (qwen3.6-27b, L36)
+Repeat on the bigger model + contrastive comparison. See
+`Plans/superellipse_qwen36_27b.md`. Needs a qwen3_5 hybrid model (transformers
+≥5.0, cu128 torch). Contrastive leg uses exp_map target `qwen36`.
+- **Verify forward + timing (pod):** `jlens/verify_qwen36_forward.py`
+- **Download/inspect lens:** `jlens/download_inspect_lens_qwen36.py`
+- **Build ZH+EN direction pairs:** `jlens/build_jlens_directions_qwen36.py`
+- **Scale ZH pairs to ~100:** `jlens/build_jlens_zh_pairs_qwen36.py`
+- **Expand/curate EN pairs:** `jlens/expand_en_pairs_qwen36.py` (vocab scan),
+  `jlens/concrete_en_pairs_qwen36.py` (concrete nouns),
+  `jlens/diagnose_en_cos_qwen36.py` (shared-direction diagnostic)
+- **Iso-plateau sweeps + fits (pod):** `jlens/sweep_isoplateau_jlens_qwen36.py`
+  (`--directions_pkl`/`--tag` isolate runs); range: `jlens/inspect_sweep_range_generic.py`
+- **Contrastive pair select (pod):** `exp_map/select_qwen36_pairs.py`
+- **1D response-curve comparison (pod):** `jlens/response_1d_comparison_qwen36.py`
+- **Combined beeswarm + p summary:** `jlens/plot_qwen36_beeswarm.py`,
+  `jlens/summarize_qwen36_p.py`
+
 ## Jacobian analysis
 - **Compute Jacobian eigenspectrum:** `jacobian/run_jacobian_v2.py`
 - **Analyze optimized deltas:** `jacobian/analyze_delta.py`
@@ -67,6 +85,14 @@ SAE training and pruned-dictionary work (MP/FP).
 - **Perturbation sweeps:** `dictionary_learning/perturbation_sweep_dict_comparison.py`, `perturbation_sweep_reconstructions.py`
 - **Sweep directions comparison:** `dictionary_learning/sweep_directions_comparison.py`
 - **Plots:** `dictionary_learning/plot_fp_vs_mp_benchmark.py`, `plot_residual_curve.py`, `plot_sweep_cosine.py`
+
+## Superellipse p: direction vs pair decomposition
+Is p per-direction or per-pair? Additive decomposition of all-pairs p fits.
+Results: `writeup/p_additivity_direction_vs_pair.md`.
+- **Additive/dyad analysis of fit caches (local, no GPU):** `superellipse/p_additivity_analysis.py`
+  (takes `fit_pairs_dictionary.py` caches or `eval_sae_full_p.py` pkls)
+- **All-pairs fit over a dict slice (pod):** `superellipse/fit_pairs_dictionary.py`
+  with `--atom_max_idx 20 --n_pairs 190 --leg1_source dict --leg2_source dict`
 
 ## Intrinsic dimensionality estimation
 TwoNN-based intrinsic dim, clustered ID, and jacobian-matched ID.
