@@ -104,6 +104,16 @@ def main():
     ap.add_argument('--sae_ckpt', default=None,
                     help='TopK SAE checkpoint (W_enc,b_enc,W_dec,b_dec) for '
                          '--synth_mode sae_coef')
+    ap.add_argument('--extra_anchors_pt', default=None,
+                    help='.pt file with extra synthetic anchors to sweep as a '
+                         'third condition (e.g. jac_optimized_data.pt); the '
+                         'first n_act rows are used, paired with the same '
+                         'contexts and random directions')
+    ap.add_argument('--extra_anchors_key', default='X_opt',
+                    help='key of the anchor tensor inside the .pt (ignored '
+                         'if the file holds a raw tensor)')
+    ap.add_argument('--extra_label', default='jac-optimized',
+                    help='legend label for the extra-anchor condition')
     ap.add_argument('--sae_K', type=int, default=50,
                     help='# of top SAE latents per activation (the SAE L0)')
     ap.add_argument('--out', required=True)
@@ -206,6 +216,22 @@ def main():
                   f'synth mean||v||={sn:.1f} vs mean||a||={a_norms.mean():.1f}, '
                   f'mean|cos| to real={cos_to_real:.3f}', flush=True)
 
+    # Optional extra anchors from a tensor file (e.g. Jacobian-optimized
+    # points). NOTE: paired with THIS run's contexts, which need not be the
+    # contexts the points were built/optimized with.
+    extra_acts = None
+    if args.extra_anchors_pt is not None:
+        eb = torch.load(args.extra_anchors_pt, map_location='cpu',
+                        weights_only=False)
+        extra_acts = (eb[args.extra_anchors_key] if isinstance(eb, dict)
+                      else eb).float()
+        if extra_acts.shape[0] < args.n_act:
+            raise SystemExit(f'extra anchors: only {extra_acts.shape[0]} rows '
+                             f'for n_act={args.n_act}')
+        extra_acts = extra_acts[:args.n_act]
+        print(f'Extra anchors ({args.extra_label}): {tuple(extra_acts.shape)} '
+              f'mean||a||={extra_acts.norm(dim=-1).mean():.2f}', flush=True)
+
     angles_deg = np.linspace(0.0, args.max_angle, args.n_steps)
     angles_rad = np.deg2rad(angles_deg)
     print(f'Sweep angles 0..{args.max_angle}° in {args.n_steps} steps  '
@@ -218,6 +244,8 @@ def main():
     n_combos = synth_all.shape[0] if synth_all is not None else 0
     out_synth = (np.zeros((n_combos, args.n_act, args.n_dirs, args.n_steps),
                           dtype=np.float32) if n_combos else None)
+    out_extra = (np.zeros((args.n_act, args.n_dirs, args.n_steps),
+                          dtype=np.float32) if extra_acts is not None else None)
     synth_dev = (synth_all.to(device=device, dtype=torch.float32)
                  if synth_all is not None else None)
 
@@ -238,6 +266,11 @@ def main():
                 out_synth[c, i, r] = sweep_1d(model, ctx, synth_dev[c, i], d,
                                               args.layer, measure_layer,
                                               angles_rad, model_dtype, device)
+            if out_extra is not None:
+                a_extra = extra_acts[i].to(device=device, dtype=torch.float32)
+                out_extra[i, r] = sweep_1d(model, ctx, a_extra, d, args.layer,
+                                           measure_layer, angles_rad,
+                                           model_dtype, device)
         if (i + 1) % 5 == 0 or i == args.n_act - 1:
             print(f'  anchor {i+1}/{args.n_act}  elapsed={time.time()-t0:.1f}s',
                   flush=True)
@@ -252,6 +285,8 @@ def main():
             'rand_l2': out_rand,
             'synth_l2': out_synth,  # [n_combos, n_act, n_dirs, n_steps] or None
             'synth_meta': synth_meta,
+            'extra_l2': out_extra,  # [n_act, n_dirs, n_steps] or None
+            'extra_label': args.extra_label,
             'a_norms': a_norms.numpy(),
         }, f)
 
@@ -259,6 +294,9 @@ def main():
     rand_flat = out_rand.reshape(-1, args.n_steps)
     series = [(real_flat, 'C0', 'real activation'),
               (rand_flat, 'C1', 'norm-matched random activation')]
+    if out_extra is not None:
+        series.append((out_extra.reshape(-1, args.n_steps), 'C2',
+                       args.extra_label))
     if out_synth is not None:
         tag = (f'{args.n_synth_dirs or "all"} atoms'
                if args.synth_mode == 'equal_sum'
@@ -287,6 +325,8 @@ def main():
     # Console summary: median L2 per condition at sample angles.
     print('\n=== median L2 at sample angles ===')
     cols = [('real', real_flat), ('rand', rand_flat)]
+    if out_extra is not None:
+        cols.append(('extra', out_extra.reshape(-1, args.n_steps)))
     if out_synth is not None:
         for c in range(n_combos):
             cols.append((f'synth{c}', out_synth[c].reshape(-1, args.n_steps)))
