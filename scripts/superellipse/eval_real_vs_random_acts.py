@@ -32,11 +32,7 @@ from src.model import load_model, _get_blocks, forward_from_layer_to_layer
 from src.data import load_fineweb_fixed_length
 
 
-def fineweb_ctx_acts(model, tokenizer, device, layer, n_act, seq_len, seed):
-    cache_dir = '/workspace/fineweb_cache'
-    os.makedirs(cache_dir, exist_ok=True)
-    token_lists = load_fineweb_fixed_length(
-        n_act, tokenizer, seq_len=seq_len, seed=seed, cache_dir=cache_dir)
+def ctx_acts_from_token_lists(model, device, layer, token_lists):
     contexts, activations = [], []
     for tids in token_lists:
         tids = tids.unsqueeze(0).to(device)
@@ -46,6 +42,26 @@ def fineweb_ctx_acts(model, tokenizer, device, layer, n_act, seq_len, seed):
         contexts.append(h[:, :-1, :].float().cpu())
         activations.append(h[:, -1, :].squeeze(0).float().cpu())
     return contexts, torch.stack(activations)
+
+
+def fineweb_ctx_acts(model, tokenizer, device, layer, n_act, seq_len, seed):
+    cache_dir = '/workspace/fineweb_cache'
+    os.makedirs(cache_dir, exist_ok=True)
+    token_lists = load_fineweb_fixed_length(
+        n_act, tokenizer, seq_len=seq_len, seed=seed, cache_dir=cache_dir)
+    return ctx_acts_from_token_lists(model, device, layer, token_lists)
+
+
+def random_token_ctx_acts(model, tokenizer, device, layer, n_act, seq_len,
+                          seed):
+    """Anchors from random token-id sequences: uniform over the base vocab
+    (special/added tokens excluded), same seq_len as the FineWeb condition.
+    Each anchor keeps its own context, mirroring the real-activation setup."""
+    g = torch.Generator().manual_seed(seed)
+    vocab = tokenizer.vocab_size
+    token_lists = [torch.randint(0, vocab, (seq_len,), generator=g)
+                   for _ in range(n_act)]
+    return ctx_acts_from_token_lists(model, device, layer, token_lists)
 
 
 def sweep_1d(model, ctx_d, a_dev, d_dev, layer, measure_layer,
@@ -104,16 +120,24 @@ def main():
     ap.add_argument('--sae_ckpt', default=None,
                     help='TopK SAE checkpoint (W_enc,b_enc,W_dec,b_dec) for '
                          '--synth_mode sae_coef')
-    ap.add_argument('--extra_anchors_pt', default=None,
-                    help='.pt file with extra synthetic anchors to sweep as a '
-                         'third condition (e.g. jac_optimized_data.pt); the '
-                         'first n_act rows are used, paired with the same '
-                         'contexts and random directions')
-    ap.add_argument('--extra_anchors_key', default='X_opt',
+    ap.add_argument('--extra_anchors_pt', action='append', default=None,
+                    help='.pt file with extra synthetic anchors to sweep as '
+                         'an additional condition (e.g. '
+                         'jac_optimized_data.pt); the first n_act rows are '
+                         'used, paired with the same contexts and random '
+                         'directions. Repeat the flag for several sets.')
+    ap.add_argument('--extra_anchors_key', action='append', default=None,
                     help='key of the anchor tensor inside the .pt (ignored '
-                         'if the file holds a raw tensor)')
-    ap.add_argument('--extra_label', default='jac-optimized',
-                    help='legend label for the extra-anchor condition')
+                         'if the file holds a raw tensor); one per '
+                         '--extra_anchors_pt (default X_opt)')
+    ap.add_argument('--extra_label', action='append', default=None,
+                    help='legend label, one per --extra_anchors_pt')
+    ap.add_argument('--random_tokens', action='store_true',
+                    help='add a condition: anchors from random token-id '
+                         'sequences (uniform over vocab, same seq_len), each '
+                         'swept with its own context')
+    ap.add_argument('--rand_tok_seed', type=int, default=1234,
+                    help='seed for sampling the random token sequences')
     ap.add_argument('--sae_K', type=int, default=50,
                     help='# of top SAE latents per activation (the SAE L0)')
     ap.add_argument('--out', required=True)
@@ -143,6 +167,19 @@ def main():
     a_norms = activations.norm(dim=-1)
     print(f'  mean ||a||={a_norms.mean().item():.2f}  '
           f'std={a_norms.std().item():.2f}', flush=True)
+
+    # Optional anchors from random token sequences (with their own contexts)
+    rt_contexts, rt_acts = None, None
+    if args.random_tokens:
+        print(f'Extracting {args.n_act} random-token anchors '
+              f'(seq_len={args.seq_len}, seed={args.rand_tok_seed})',
+              flush=True)
+        rt_contexts, rt_acts = random_token_ctx_acts(
+            model, tokenizer, device, args.layer, args.n_act, args.seq_len,
+            args.rand_tok_seed)
+        rt_norms = rt_acts.norm(dim=-1)
+        print(f'  mean ||a||={rt_norms.mean().item():.2f}  '
+              f'std={rt_norms.std().item():.2f}', flush=True)
 
     # Norm-matched random "activations": same per-anchor norm, random unit dir
     g_act = torch.Generator(device=device).manual_seed(args.rand_seed)
@@ -216,21 +253,26 @@ def main():
                   f'synth mean||v||={sn:.1f} vs mean||a||={a_norms.mean():.1f}, '
                   f'mean|cos| to real={cos_to_real:.3f}', flush=True)
 
-    # Optional extra anchors from a tensor file (e.g. Jacobian-optimized
+    # Optional extra anchor sets from tensor files (e.g. Jacobian-optimized
     # points). NOTE: paired with THIS run's contexts, which need not be the
     # contexts the points were built/optimized with.
-    extra_acts = None
-    if args.extra_anchors_pt is not None:
-        eb = torch.load(args.extra_anchors_pt, map_location='cpu',
-                        weights_only=False)
-        extra_acts = (eb[args.extra_anchors_key] if isinstance(eb, dict)
-                      else eb).float()
-        if extra_acts.shape[0] < args.n_act:
-            raise SystemExit(f'extra anchors: only {extra_acts.shape[0]} rows '
-                             f'for n_act={args.n_act}')
-        extra_acts = extra_acts[:args.n_act]
-        print(f'Extra anchors ({args.extra_label}): {tuple(extra_acts.shape)} '
-              f'mean||a||={extra_acts.norm(dim=-1).mean():.2f}', flush=True)
+    extra_sets = []          # list of (label, [n_act, d] tensor)
+    if args.extra_anchors_pt:
+        keys = args.extra_anchors_key or []
+        labels = args.extra_label or []
+        for j, pt in enumerate(args.extra_anchors_pt):
+            key = keys[j] if j < len(keys) else 'X_opt'
+            label = (labels[j] if j < len(labels)
+                     else os.path.basename(pt).rsplit('.', 1)[0])
+            eb = torch.load(pt, map_location='cpu', weights_only=False)
+            acts = (eb[key] if isinstance(eb, dict) else eb).float()
+            if acts.shape[0] < args.n_act:
+                raise SystemExit(f'extra anchors {pt}: only {acts.shape[0]} '
+                                 f'rows for n_act={args.n_act}')
+            acts = acts[:args.n_act]
+            extra_sets.append((label, acts))
+            print(f'Extra anchors ({label}): {tuple(acts.shape)} '
+                  f'mean||a||={acts.norm(dim=-1).mean():.2f}', flush=True)
 
     angles_deg = np.linspace(0.0, args.max_angle, args.n_steps)
     angles_rad = np.deg2rad(angles_deg)
@@ -244,8 +286,10 @@ def main():
     n_combos = synth_all.shape[0] if synth_all is not None else 0
     out_synth = (np.zeros((n_combos, args.n_act, args.n_dirs, args.n_steps),
                           dtype=np.float32) if n_combos else None)
-    out_extra = (np.zeros((args.n_act, args.n_dirs, args.n_steps),
-                          dtype=np.float32) if extra_acts is not None else None)
+    out_extras = [np.zeros((args.n_act, args.n_dirs, args.n_steps),
+                           dtype=np.float32) for _ in extra_sets]
+    out_randtok = (np.zeros((args.n_act, args.n_dirs, args.n_steps),
+                            dtype=np.float32) if args.random_tokens else None)
     synth_dev = (synth_all.to(device=device, dtype=torch.float32)
                  if synth_all is not None else None)
 
@@ -266,11 +310,18 @@ def main():
                 out_synth[c, i, r] = sweep_1d(model, ctx, synth_dev[c, i], d,
                                               args.layer, measure_layer,
                                               angles_rad, model_dtype, device)
-            if out_extra is not None:
-                a_extra = extra_acts[i].to(device=device, dtype=torch.float32)
-                out_extra[i, r] = sweep_1d(model, ctx, a_extra, d, args.layer,
-                                           measure_layer, angles_rad,
-                                           model_dtype, device)
+            for j, (_, acts) in enumerate(extra_sets):
+                a_extra = acts[i].to(device=device, dtype=torch.float32)
+                out_extras[j][i, r] = sweep_1d(model, ctx, a_extra, d,
+                                               args.layer, measure_layer,
+                                               angles_rad, model_dtype,
+                                               device)
+            if out_randtok is not None:
+                ctx_rt = rt_contexts[i].to(device=device, dtype=model_dtype)
+                a_rt = rt_acts[i].to(device=device, dtype=torch.float32)
+                out_randtok[i, r] = sweep_1d(model, ctx_rt, a_rt, d,
+                                             args.layer, measure_layer,
+                                             angles_rad, model_dtype, device)
         if (i + 1) % 5 == 0 or i == args.n_act - 1:
             print(f'  anchor {i+1}/{args.n_act}  elapsed={time.time()-t0:.1f}s',
                   flush=True)
@@ -285,8 +336,11 @@ def main():
             'rand_l2': out_rand,
             'synth_l2': out_synth,  # [n_combos, n_act, n_dirs, n_steps] or None
             'synth_meta': synth_meta,
-            'extra_l2': out_extra,  # [n_act, n_dirs, n_steps] or None
-            'extra_label': args.extra_label,
+            'extra_l2': out_extras,  # list of [n_act, n_dirs, n_steps]
+            'extra_labels': [lab for lab, _ in extra_sets],
+            'randtok_l2': out_randtok,  # [n_act, n_dirs, n_steps] or None
+            'randtok_norms': (rt_acts.norm(dim=-1).numpy()
+                              if rt_acts is not None else None),
             'a_norms': a_norms.numpy(),
         }, f)
 
@@ -294,9 +348,13 @@ def main():
     rand_flat = out_rand.reshape(-1, args.n_steps)
     series = [(real_flat, 'C0', 'real activation'),
               (rand_flat, 'C1', 'norm-matched random activation')]
-    if out_extra is not None:
-        series.append((out_extra.reshape(-1, args.n_steps), 'C2',
-                       args.extra_label))
+    extra_colors = ['C2', 'C4', 'C5', 'C6', 'C7']
+    for j, (lab, _) in enumerate(extra_sets):
+        series.append((out_extras[j].reshape(-1, args.n_steps),
+                       extra_colors[j % len(extra_colors)], lab))
+    if out_randtok is not None:
+        series.append((out_randtok.reshape(-1, args.n_steps), 'C3',
+                       'random-token activation'))
     if out_synth is not None:
         tag = (f'{args.n_synth_dirs or "all"} atoms'
                if args.synth_mode == 'equal_sum'
@@ -325,8 +383,10 @@ def main():
     # Console summary: median L2 per condition at sample angles.
     print('\n=== median L2 at sample angles ===')
     cols = [('real', real_flat), ('rand', rand_flat)]
-    if out_extra is not None:
-        cols.append(('extra', out_extra.reshape(-1, args.n_steps)))
+    for j, (lab, _) in enumerate(extra_sets):
+        cols.append((lab[:9], out_extras[j].reshape(-1, args.n_steps)))
+    if out_randtok is not None:
+        cols.append(('randtok', out_randtok.reshape(-1, args.n_steps)))
     if out_synth is not None:
         for c in range(n_combos):
             cols.append((f'synth{c}', out_synth[c].reshape(-1, args.n_steps)))
