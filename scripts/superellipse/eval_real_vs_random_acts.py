@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""1D spherical perturbation: real activation vs norm-matched random activation,
+"""1D spherical perturbation: real activation vs random activation,
 both perturbed along random directions.
 
 Mirrors eval_plateaus_1d.py (which is known to fit gemma-2-9b on a 4090) but
@@ -29,7 +29,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from src.model import load_model, _get_blocks, forward_from_layer_to_layer
-from src.data import load_fineweb_fixed_length
+from src.data import load_fineweb_fixed_length, sample_random_activations_v2
 
 
 def ctx_acts_from_token_lists(model, device, layer, token_lists):
@@ -136,6 +136,18 @@ def main():
                     help='add a condition: anchors from random token-id '
                          'sequences (uniform over vocab, same seq_len), each '
                          'swept with its own context')
+    ap.add_argument('--rand_mode', default='norm', choices=['norm', 'cov'],
+                    help="how the random-activation baseline is drawn. 'norm': "
+                         "isotropic, matched to each anchor's norm (the "
+                         "original behaviour, kept as default so earlier runs "
+                         "reproduce). 'cov': Gaussian fitted to a pool of real "
+                         "activations, matching mean and full covariance.")
+    ap.add_argument('--rand_cov_pool', type=int, default=2000,
+                    help='--rand_mode cov: real activations used for the fit')
+    ap.add_argument('--rand_cov_seed', type=int, default=43,
+                    help='--rand_mode cov: FineWeb seed for that pool, kept '
+                         'distinct from --seed so the pool and the anchors are '
+                         'different samples')
     ap.add_argument('--rand_tok_seed', type=int, default=1234,
                     help='seed for sampling the random token sequences')
     ap.add_argument('--sae_K', type=int, default=50,
@@ -181,13 +193,29 @@ def main():
         print(f'  mean ||a||={rt_norms.mean().item():.2f}  '
               f'std={rt_norms.std().item():.2f}', flush=True)
 
-    # Norm-matched random "activations": same per-anchor norm, random unit dir
+    # Random "activations". 'norm': same per-anchor norm, random unit direction
+    # (isotropic). 'cov': drawn from a Gaussian fitted to a pool of real
+    # activations, so the anisotropy of the residual stream is matched too —
+    # a much stronger off-manifold baseline than the isotropic one.
     g_act = torch.Generator(device=device).manual_seed(args.rand_seed)
-    rand_acts = torch.randn(args.n_act, d_model, generator=g_act, device=device,
-                            dtype=torch.float32)
-    rand_acts = rand_acts / rand_acts.norm(dim=-1, keepdim=True)
-    rand_acts = rand_acts * a_norms.to(device).unsqueeze(-1)
-    rand_acts = rand_acts.cpu()
+    if args.rand_mode == 'cov':
+        print(f'Fitting cov-matched Gaussian on {args.rand_cov_pool} FineWeb '
+              f'activations (seed={args.rand_cov_seed})', flush=True)
+        _, pool_acts = fineweb_ctx_acts(model, tokenizer, device, args.layer,
+                                        args.rand_cov_pool, args.seq_len,
+                                        args.rand_cov_seed)
+        rand_acts, _ = sample_random_activations_v2(
+            pool_acts.float(), args.n_act, mode='full', seed=args.rand_seed,
+            device=str(device))
+        rand_acts = rand_acts.float().cpu()
+    else:
+        rand_acts = torch.randn(args.n_act, d_model, generator=g_act,
+                                device=device, dtype=torch.float32)
+        rand_acts = rand_acts / rand_acts.norm(dim=-1, keepdim=True)
+        rand_acts = rand_acts * a_norms.to(device).unsqueeze(-1)
+        rand_acts = rand_acts.cpu()
+    print(f'  random activations ({args.rand_mode}-matched): '
+          f'mean||a||={rand_acts.norm(dim=-1).mean().item():.2f}', flush=True)
 
     # Random unit directions (n_dirs of them, shared across all anchors)
     g_d = torch.Generator(device=device).manual_seed(args.rand_seed + 1)
@@ -347,7 +375,8 @@ def main():
     real_flat = out_real.reshape(-1, args.n_steps)
     rand_flat = out_rand.reshape(-1, args.n_steps)
     series = [(real_flat, 'C0', 'real activation'),
-              (rand_flat, 'C1', 'norm-matched random activation')]
+              (rand_flat, 'C1',
+               f'{args.rand_mode}-matched random activation')]
     extra_colors = ['C2', 'C4', 'C5', 'C6', 'C7']
     for j, (lab, _) in enumerate(extra_sets):
         series.append((out_extras[j].reshape(-1, args.n_steps),
