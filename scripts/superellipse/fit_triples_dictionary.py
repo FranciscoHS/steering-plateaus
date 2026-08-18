@@ -21,7 +21,7 @@ fits:
   - median over held-out anchors; bootstrap over anchors for the CI.
 
 The coordinate-plane rays (phi=90 row; theta=0 and theta=90 columns) give
-the three 2D face fits from the same sweep, so each triple also reports its
+the three 2D pairwise fits from the same sweep, so each triple also reports its
 pairwise p's (d1-d2, d1-d3, d2-d3) for the pair-vs-triple comparison.
 
 Usage:
@@ -171,7 +171,7 @@ def fit_superellipsoid(X, bounds=(0.5, 10.0)):
 
 
 def fit_superellipse_2d(x, y, bounds=(0.5, 10.0)):
-    """2D face fit, same convention as canonical fit_superellipse."""
+    """2D pairwise fit, same convention as canonical fit_superellipse."""
     x = np.asarray(x, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
     mask = (x > 0.05) & (y > 0.05) & (x < 1.5) & (y < 1.5)
@@ -190,7 +190,7 @@ def fit_triple_from_grid(radii_deg, R_grid, U, axis_idx, threshold_frac=0.5,
                          edge_eps_deg=1.0):
     """Full fit pipeline on one anchor-reduced response grid [n_rays, n_r].
 
-    Returns dict with the 3D fit, the three 2D face fits, threshold,
+    Returns dict with the 3D fit, the three 2D pairwise fits, threshold,
     axis intercepts, and the normalized points.
     """
     ax = [axis_idx[1], axis_idx[2], axis_idx[3]]
@@ -198,7 +198,7 @@ def fit_triple_from_grid(radii_deg, R_grid, U, axis_idx, threshold_frac=0.5,
     T = threshold_frac * base
     t = np.array([axis_intercept(radii_deg, R_grid[a], T) for a in ax])
     out = {'threshold': float(T), 'base': float(base), 'intercepts_deg': t,
-           'fit3': {'p': np.nan, 'n_pts': 0}, 'faces': {},
+           'fit3': {'p': np.nan, 'n_pts': 0}, 'pairwise': {},
            'n_rays_crossed': 0}
     if not np.all(np.isfinite(t)) or np.any(t <= 0):
         return out
@@ -220,11 +220,11 @@ def fit_triple_from_grid(radii_deg, R_grid, U, axis_idx, threshold_frac=0.5,
 
     out['fit3'] = fit_superellipsoid(X_ok)
 
-    # face fits from the coordinate-plane rays (third cosine == 0)
+    # pairwise fits from the coordinate-plane rays (third cosine == 0)
     for (i, j, k), name in (((0, 1, 2), 'd1d2'), ((0, 2, 1), 'd1d3'),
                             ((1, 2, 0), 'd2d3')):
         plane = np.abs(U_ok[:, k]) < 1e-9
-        out['faces'][name] = fit_superellipse_2d(X_ok[plane, i],
+        out['pairwise'][name] = fit_superellipse_2d(X_ok[plane, i],
                                                  X_ok[plane, j])
     return out
 
@@ -384,13 +384,13 @@ def main():
         p_lo = float(np.percentile(p_boot, 5)) if len(p_boot) else np.nan
         p_hi = float(np.percentile(p_boot, 95)) if len(p_boot) else np.nan
 
-        face_p = {k: v['p'] for k, v in fit['faces'].items()}
+        pair_p = {k: v['p'] for k, v in fit['pairwise'].items()}
         per_triple.append({
             'idxs': idxs, 'cos': cos,
             'p3': fit['fit3']['p'], 'p3_lo': p_lo, 'p3_hi': p_hi,
             'n_pts3': fit['fit3']['n_pts'],
             'mean_radial_frac': fit['fit3']['mean_radial_frac'],
-            'faces': face_p,
+            'pairwise_p': pair_p,
             'intercepts_deg': fit['intercepts_deg'],
             'threshold': fit['threshold'],
             'n_rays_crossed': fit['n_rays_crossed'],
@@ -401,11 +401,11 @@ def main():
         done = n + 1
         rate = (time.time() - t_start) / done
         eta = rate * (len(triples) - done)
-        fstr = ' '.join(f'{k}={v:.2f}' for k, v in face_p.items())
+        fstr = ' '.join(f'{k}={v:.2f}' for k, v in pair_p.items())
         print(f'[{done:>3}/{len(triples)}] {idxs}  '
               f'cos=({cos[0]:+.2f},{cos[1]:+.2f},{cos[2]:+.2f})  '
               f'p3={fit["fit3"]["p"]:.3f} [{p_lo:.2f},{p_hi:.2f}] '
-              f'(n={fit["fit3"]["n_pts"]})  faces: {fstr}  '
+              f'(n={fit["fit3"]["n_pts"]})  pairwise: {fstr}  '
               f'rate={rate:.1f}s/triple ETA={eta/60:.1f}min', flush=True)
 
         # incremental checkpoint (grids included; ~100KB/triple)
@@ -417,25 +417,25 @@ def main():
     # Summary
     p3 = np.array([t['p3'] for t in per_triple], dtype=float)
     finite = np.isfinite(p3)
-    faces_all = np.array([[t['faces'][k] for k in ('d1d2', 'd1d3', 'd2d3')]
+    pairwise_all = np.array([[t['pairwise_p'][k] for k in ('d1d2', 'd1d3', 'd2d3')]
                           for t in per_triple], dtype=float)
     p3_med = float(np.median(p3[finite])) if finite.any() else np.nan
     print('\n=== Triple-level summary ===')
     print(f'  p3:      median={p3_med:.3f}  '
           f'IQR=({np.nanquantile(p3, 0.25):.3f}, '
           f'{np.nanquantile(p3, 0.75):.3f})  n={int(finite.sum())}')
-    print(f'  face p:  median={np.nanmedian(faces_all):.3f}  '
-          f'(per-face medians: '
-          f'{np.nanmedian(faces_all[:, 0]):.2f}/'
-          f'{np.nanmedian(faces_all[:, 1]):.2f}/'
-          f'{np.nanmedian(faces_all[:, 2]):.2f})')
+    print(f'  pairwise p: median={np.nanmedian(pairwise_all):.3f}  '
+          f'(per-pair medians: '
+          f'{np.nanmedian(pairwise_all[:, 0]):.2f}/'
+          f'{np.nanmedian(pairwise_all[:, 1]):.2f}/'
+          f'{np.nanmedian(pairwise_all[:, 2]):.2f})')
 
     # Plots
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
     ax = axes[0]
     ax.hist(p3[finite], bins=25, edgecolor='black', alpha=0.8, label='p3')
-    ax.hist(faces_all[np.isfinite(faces_all)].ravel(), bins=25,
-            histtype='step', lw=2, color='C1', label='face p (2D)')
+    ax.hist(pairwise_all[np.isfinite(pairwise_all)].ravel(), bins=25,
+            histtype='step', lw=2, color='C1', label='pairwise p (2D)')
     ax.axvline(2.0, color='gray', ls=':', label='p=2')
     ax.axvline(p3_med, color='C0', lw=2)
     ax.set_xlabel('fitted p'); ax.set_ylabel('# triples')
@@ -444,11 +444,11 @@ def main():
     ax.legend(fontsize=9); ax.grid(True, alpha=0.3)
 
     ax = axes[1]
-    face_mean = np.nanmean(faces_all, axis=1)
-    ax.scatter(face_mean, p3, s=20, alpha=0.7)
-    lim = [0.5, max(np.nanmax(p3), np.nanmax(face_mean), 4) * 1.05]
+    pair_mean = np.nanmean(pairwise_all, axis=1)
+    ax.scatter(pair_mean, p3, s=20, alpha=0.7)
+    lim = [0.5, max(np.nanmax(p3), np.nanmax(pair_mean), 4) * 1.05]
     ax.plot(lim, lim, color='gray', ls=':', lw=1)
-    ax.set_xlabel('mean face p (pairwise, same sweep)')
+    ax.set_xlabel('mean pairwise p (2D, same sweep)')
     ax.set_ylabel('p3 (triple)')
     ax.set_title('triple p vs mean pairwise p')
     ax.grid(True, alpha=0.3)

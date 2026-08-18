@@ -96,7 +96,7 @@ Results: `writeup/p_additivity_direction_vs_pair.md`.
 
 ## Superellipse p: triples of directions
 Hyperspherical-ray sweep + superellipsoid |x|^p+|y|^p+|z|^p=1 fit for
-direction triples; also reports the three 2D face fits per triple.
+direction triples; also reports the three 2D pairwise fits per triple.
 - **Fit p over triples (pod):** `superellipse/fit_triples_dictionary.py`
   with `--leg{1,2,3}_source dict|scaffold|random`
 
