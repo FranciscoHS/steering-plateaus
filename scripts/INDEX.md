@@ -94,6 +94,12 @@ Results: `writeup/p_additivity_direction_vs_pair.md`.
 - **All-pairs fit over a dict slice (pod):** `superellipse/fit_pairs_dictionary.py`
   with `--atom_max_idx 20 --n_pairs 190 --leg1_source dict --leg2_source dict`
 
+## Superellipse p: triples of directions
+Hyperspherical-ray sweep + superellipsoid |x|^p+|y|^p+|z|^p=1 fit for
+direction triples; also reports the three 2D face fits per triple.
+- **Fit p over triples (pod):** `superellipse/fit_triples_dictionary.py`
+  with `--leg{1,2,3}_source dict|scaffold|random`
+
 ## Intrinsic dimensionality estimation
 TwoNN-based intrinsic dim, clustered ID, and jacobian-matched ID.
 - **TwoNN baseline:** `intrinsic_dim/intrinsic_dim_twonn.py`
