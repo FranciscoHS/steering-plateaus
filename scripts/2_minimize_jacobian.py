@@ -157,7 +157,8 @@ def main():
     contexts = torch.cat(all_contexts, dim=0)
 
     # Pick subset of Gaussian points + their carrier contexts
-    gauss_subset = X_gauss[:n_points]
+    # clone: a slice keeps the whole 20000-point pool alive, and torch.save would write all of it
+    gauss_subset = X_gauss[:n_points].clone()
     ctx_subset = contexts[torch.arange(n_points) % len(contexts)]
 
     # TWO-NN before optimization (on same subset for comparison)

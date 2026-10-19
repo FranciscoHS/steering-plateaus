@@ -2,3 +2,4 @@ __pycache__/
 *.py[cod]
 fineweb_cache/
 .DS_Store
+results/intrinsic_dim/jac_filtered_data.pt

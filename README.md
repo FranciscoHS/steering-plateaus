@@ -23,10 +23,16 @@ Run everything from the repo root.
    - Takes the first 200 Gaussian points, each patched into a real FineWeb context.
    - Runs gradient descent (Adam, 200 steps, lr 0.1) to minimize ||J||_F + λ||x − x_start||² with λ = 0.001.
    - Writes `results/intrinsic_dim/jac_optimized_data.pt`. Key `X_opt` holds the [200, 2048] optimized points; `X_gauss_subset` holds their starting points.
-3. `python scripts/3_perturbation_sweep.py --model qwen3-1.7b --layer 2 --extra_anchors_pt results/intrinsic_dim/jac_optimized_data.pt --extra_label jac-optimized --out results/perturbation_sweep/qwen3-1.7b_L2`
+3. `python scripts/3_perturbation_sweep.py --model qwen3-1.7b --layer 2 --n_act 30 --seq_len 5 --max_angle 90 --n_steps 46 --n_dirs 10 --extra_anchors_pt results/intrinsic_dim/jac_optimized_data.pt --extra_anchors_key X_opt --extra_label jac-optimized --out results/real_vs_random_acts/qwen3-1.7b_L2_jacopt`
    - Rotates each anchor along random directions on its norm sphere and records the L2 change of the residual stream at a later layer, as a function of angle.
    - Conditions: real activations, random activations (`--rand_mode norm` or `cov`), and the Jacobian-optimized points.
    - All conditions share the same contexts and the same random directions.
+
+## Results included
+
+- `results/intrinsic_dim/jac_optimized_data.pt`: output of step 2. It holds the 200 optimized points (`X_opt`), their starting points (`X_gauss_subset`), the loss history, and TWO-NN ID before and after optimization.
+- `results/real_vs_random_acts/qwen3-1.7b_L2_jacopt/`: output of step 3 (`results.pkl`, `sweep.png`), produced by the exact command above. It compares 30 anchors x 10 random directions, rotated 0-90 degrees, with L2 measured at layer 26. The random baseline is isotropic and norm-matched per anchor (`--rand_mode norm`, the default).
+- Not included: `jac_filtered_data.pt` (step 1 output, 176 MB). Step 1 regenerates it, or ask us for a copy.
 
 ## Caveat
 
