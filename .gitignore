@@ -1,39 +1,4 @@
-# Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-*.egg
-*.egg-info/
-dist/
-build/
-.eggs/
-
-# Jupyter
-.ipynb_checkpoints/
-
-# Results (sync separately, can get large)
-results/
-
-# Obsidian hub note symlink (lives in vault)
-notes/
-
-# Environment
-.env
-venv/
-.venv/
-
-# IDE
-.vscode/
-.idea/
-
-# OS
+fineweb_cache/
 .DS_Store
-Thumbs.db
-
-# LaTeX build artifacts
-*.aux
-*.log
-*.out
-*.toc
-*.synctex.gz

@@ -1,9 +1,6 @@
 torch
-transformer_lens
 transformers
+datasets
 numpy
 matplotlib
-jupyter
-einops
-anthropic
-scipy
+scikit-dimension  # imported as skdim; TWO-NN intrinsic dimension in steps 1-2

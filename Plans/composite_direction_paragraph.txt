@@ -1,5 +1,0 @@
-Given directions $\vec{d_1}$ and $\vec{d_2}$, we project them onto the tangent plane at $\hat{a} = \vec{a}/\lVert\vec{a}\rVert$ and orthonormalize to obtain $\vec{d_1^{\perp}}$, $\vec{d_2^{\perp}}$. We then form the unit tangent direction $\vec{d}(\varphi) = \cos\varphi\, \vec{d_1^{\perp}} + \sin\varphi\, \vec{d_2^{\perp}}$, for $\varphi \in [0, \pi/2]$, and perturb along $\vec{d}(\varphi)$ via the geodesic (exp-map) step
-\begin{equation}
-    \vec{a}'(\alpha, \varphi) \;=\; \lVert\vec{a}\rVert \bigl( \cos\alpha\, \hat{a} + \sin\alpha\, \vec{d}(\varphi) \bigr),
-\end{equation}
-with $\alpha$ the great-circle angle from the anchor (as in the single-direction sweep).
